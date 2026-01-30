@@ -35,3 +35,9 @@ export interface SidebarItemProps {
     active: boolean;
     onNavigate?: () => void;
 }
+
+export interface Category {
+  id: string;
+  name: string;
+  order: number;
+}

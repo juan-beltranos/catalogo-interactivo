@@ -9,18 +9,15 @@ import {
   orderBy,
   onSnapshot,
   serverTimestamp,
+  getDocs,
+  where,
 } from "firebase/firestore";
 import { db } from "../../lib/firebase";
-// Opcional: helper
-// import { getActiveStoreId } from "../../lib/store";
-
-interface Category {
-  id: string;
-  name: string;
-  order: number;
-}
+import { Category } from "@/interfaces";
+import { useAuth } from "@/context/AuthContext";
 
 const CategoriesView: React.FC = () => {
+  const { user } = useAuth();
   const [storeId, setStoreId] = useState<string | null>(null);
 
   const [categories, setCategories] = useState<Category[]>([]);
@@ -30,27 +27,41 @@ const CategoriesView: React.FC = () => {
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [error, setError] = useState("");
 
-  // Edit State
   const [editingCategory, setEditingCategory] = useState<Category | null>(null);
 
-  // 1) Cargar storeId (MVP: desde localStorage)
   useEffect(() => {
-    const id = localStorage.getItem("activeStoreId");
-    if (!id) {
-      setError("No se encontró la tienda activa. Vuelve a registrarte o configura la tienda.");
-      setLoading(false);
-      return;
-    }
-    setStoreId(id);
-  }, []);
+    if (!user) return;
 
-  // 2) Referencia a subcolección de categorías
+    const fetchStore = async () => {
+      try {
+        setLoading(true);
+        setError("");
+
+        const q = query(collection(db, "stores"), where("ownerUid", "==", user.uid));
+        const snap = await getDocs(q);
+
+        if (!snap.empty) {
+          setStoreId(snap.docs[0].id);
+        } else {
+          setStoreId(null);
+          setError("No se encontró tienda para este usuario.");
+        }
+      } catch (e) {
+        console.error(e);
+        setError("Error buscando tienda del usuario.");
+      } finally {
+        setLoading(false);
+      }
+    };
+
+    fetchStore();
+  }, [user]);
+
   const categoriesRef = useMemo(() => {
     if (!storeId) return null;
     return collection(db, "stores", storeId, "categories");
   }, [storeId]);
 
-  // 3) Listener de categorías por tienda
   useEffect(() => {
     if (!categoriesRef) return;
 
@@ -68,7 +79,6 @@ const CategoriesView: React.FC = () => {
         setCategories(cats);
         setLoading(false);
 
-        // sugerir orden para siguiente categoría
         const nextOrder = cats.length ? Math.max(...cats.map((c) => c.order)) + 1 : 1;
         setNewCategoryOrder(nextOrder);
       },
