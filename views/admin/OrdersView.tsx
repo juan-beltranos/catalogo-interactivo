@@ -1,0 +1,422 @@
+import React, { useEffect, useMemo, useState } from "react";
+import {
+  collection,
+  query,
+  orderBy,
+  onSnapshot,
+  doc,
+  updateDoc,
+  deleteDoc,
+  where,
+  getDocs,
+  limit,
+} from "firebase/firestore";
+import { db } from "../../lib/firebase";
+import { useAuth } from "../../context/AuthContext";
+import { Order, OrderItem, OrderStatus } from "@/types";
+import { formatCOP } from "@/helpers";
+
+
+const statusMap: Record<OrderStatus, { label: string; color: string }> = {
+  new: { label: "Nuevo", color: "bg-yellow-100 text-yellow-800" },
+  confirmed: { label: "Confirmado", color: "bg-blue-100 text-blue-800" },
+  preparing: { label: "En preparación", color: "bg-indigo-100 text-indigo-800" },
+  delivered: { label: "Entregado", color: "bg-green-100 text-green-800" },
+  cancelled: { label: "Cancelado", color: "bg-red-100 text-red-800" },
+};
+
+function formatDate(ts: any) {
+  try {
+    const d = ts?.toDate?.() ? ts.toDate() : null;
+    if (!d) return "-";
+    return `${d.toLocaleDateString()} ${d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}`;
+  } catch {
+    return "-";
+  }
+}
+
+function waTo(phoneDigits: string, message?: string) {
+  const clean = (phoneDigits || "").replace(/[^\d]/g, "");
+  const text = encodeURIComponent(message || "");
+  return `https://wa.me/${clean}${message ? `?text=${text}` : ""}`;
+}
+
+const OrdersView: React.FC = () => {
+  const { user } = useAuth();
+
+  const [storeId, setStoreId] = useState<string | null>(null);
+  const [orders, setOrders] = useState<Order[]>([]);
+  const [loading, setLoading] = useState(true);
+
+  const [selectedOrder, setSelectedOrder] = useState<Order | null>(null);
+  const [filterStatus, setFilterStatus] = useState<OrderStatus | "all">("all");
+
+  // 1) Obtener storeId por ownerUid (igual que ProductsView)
+  useEffect(() => {
+    if (!user) return;
+
+    const fetchStore = async () => {
+      const qStore = query(
+        collection(db, "stores"),
+        where("ownerUid", "==", user.uid),
+        limit(1)
+      );
+      const snap = await getDocs(qStore);
+      if (!snap.empty) setStoreId(snap.docs[0].id);
+      else {
+        console.error("No se encontró tienda para este usuario");
+        setStoreId(null);
+        setLoading(false);
+      }
+    };
+
+    fetchStore();
+  }, [user]);
+
+  // 2) Escuchar pedidos de la tienda
+  useEffect(() => {
+    if (!storeId) return;
+
+    setLoading(true);
+    const qOrders = query(collection(db, "stores", storeId, "orders"), orderBy("createdAt", "desc"));
+
+    const unsubscribe = onSnapshot(
+      qOrders,
+      (snapshot) => {
+        const data = snapshot.docs.map((d) => {
+          const x = d.data() as any;
+
+          // Compat: si algún pedido viejo guarda customerName, etc., lo mapeamos
+          const customer = x.customer ?? {
+            name: x.customerName ?? "",
+            phone: x.customerPhone ?? "",
+            address: x.customerAddress ?? "",
+          };
+
+          // Compat items viejo vs nuevo
+          const items: OrderItem[] = (x.items ?? []).map((it: any) => ({
+            productId: it.productId ?? it.id ?? "",
+            productName: it.productName ?? it.name ?? "",
+            variantId: it.variantId ?? null,
+            variantTitle: it.variantTitle ?? null,
+            unitPrice: Number(it.unitPrice ?? it.price ?? 0),
+            qty: Number(it.qty ?? it.quantity ?? 1),
+            subtotal: Number(it.subtotal ?? (Number(it.unitPrice ?? it.price ?? 0) * Number(it.qty ?? it.quantity ?? 1))),
+          }));
+
+          const o: Order = {
+            id: d.id,
+            status: (x.status as OrderStatus) ?? "new",
+            channel: x.channel ?? "whatsapp",
+            customer,
+            notes: x.notes ?? "",
+            items,
+            total: Number(x.total ?? 0),
+            createdAt: x.createdAt,
+            updatedAt: x.updatedAt,
+          };
+
+          return o;
+        }) as Order[];
+
+        setOrders(data);
+        setLoading(false);
+      },
+      (err) => {
+        console.error(err);
+        setLoading(false);
+        alert("Error al cargar pedidos");
+      }
+    );
+
+    return () => unsubscribe();
+  }, [storeId]);
+
+  const filteredOrders = useMemo(() => {
+    if (filterStatus === "all") return orders;
+    return orders.filter((o) => o.status === filterStatus);
+  }, [orders, filterStatus]);
+
+  const counters = useMemo(() => {
+    const c: Record<OrderStatus, number> = {
+      new: 0,
+      confirmed: 0,
+      preparing: 0,
+      delivered: 0,
+      cancelled: 0,
+    };
+    for (const o of orders) c[o.status] = (c[o.status] || 0) + 1;
+    return c;
+  }, [orders]);
+
+  const handleUpdateStatus = async (orderId: string, newStatus: OrderStatus) => {
+    if (!storeId) return;
+    try {
+      await updateDoc(doc(db, "stores", storeId, "orders", orderId), {
+        status: newStatus,
+        updatedAt: new Date(), // o serverTimestamp() si prefieres (requiere import)
+      });
+    } catch (error) {
+      console.error("Error updating status:", error);
+      alert("Error al actualizar estado");
+    }
+  };
+
+  const handleDeleteOrder = async (orderId: string) => {
+    if (!storeId) return;
+    if (!window.confirm("¿Eliminar este pedido de la base de datos?")) return;
+
+    try {
+      await deleteDoc(doc(db, "stores", storeId, "orders", orderId));
+    } catch (error) {
+      console.error("Error deleting order:", error);
+      alert("Error al eliminar");
+    }
+  };
+
+  if (!storeId && loading) {
+    return <div className="p-8 text-center text-gray-500">Cargando tienda...</div>;
+  }
+
+  return (
+    <div className="space-y-8 animate-fade-in">
+      <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-4">
+        <div>
+          <h1 className="text-2xl font-bold text-gray-900">Pedidos</h1>
+          <p className="text-gray-500 mt-1">Monitorea y actualiza el estado de tus pedidos.</p>
+        </div>
+
+        <div className="flex items-center gap-2">
+          <select
+            value={filterStatus}
+            onChange={(e) => setFilterStatus(e.target.value as any)}
+            className="border rounded-lg px-3 py-2 text-sm"
+          >
+            <option value="all">Todos ({orders.length})</option>
+            <option value="new">Nuevos ({counters.new})</option>
+            <option value="confirmed">Confirmados ({counters.confirmed})</option>
+            <option value="preparing">En preparación ({counters.preparing})</option>
+            <option value="delivered">Entregados ({counters.delivered})</option>
+            <option value="cancelled">Cancelados ({counters.cancelled})</option>
+          </select>
+        </div>
+      </div>
+
+      <div className="bg-white rounded-xl shadow-sm border border-gray-100 overflow-hidden">
+        {loading ? (
+          <div className="p-12 flex justify-center">
+            <div className="animate-spin rounded-full h-8 w-8 border-t-2 border-b-2 border-indigo-600"></div>
+          </div>
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="w-full text-left">
+              <thead>
+                <tr className="bg-gray-50 text-gray-500 text-xs uppercase tracking-wider">
+                  <th className="px-6 py-4 font-semibold">ID / Fecha</th>
+                  <th className="px-6 py-4 font-semibold">Cliente</th>
+                  <th className="px-6 py-4 font-semibold">Estado</th>
+                  <th className="px-6 py-4 font-semibold">Total</th>
+                  <th className="px-6 py-4 font-semibold text-right">Acciones</th>
+                </tr>
+              </thead>
+
+              <tbody className="divide-y divide-gray-100">
+                {filteredOrders.map((order) => (
+                  <tr key={order.id} className="hover:bg-gray-50 transition-colors">
+                    <td className="px-6 py-4">
+                      <div className="text-xs font-mono text-indigo-600 font-bold mb-1">
+                        #{order.id.substring(0, 8)}
+                      </div>
+                      <div className="text-xs text-gray-400">{formatDate(order.createdAt)}</div>
+                      <div className="text-[10px] text-gray-400 mt-1">
+                        Canal: {order.channel || "whatsapp"}
+                      </div>
+                    </td>
+
+                    <td className="px-6 py-4">
+                      <div className="text-sm font-bold text-gray-900">{order.customer?.name}</div>
+                      <div className="text-xs text-gray-500">{order.customer?.phone}</div>
+                      <div className="text-xs text-gray-400 truncate max-w-[260px]">
+                        {order.customer?.address}
+                      </div>
+                    </td>
+
+                    <td className="px-6 py-4">
+                      <select
+                        value={order.status}
+                        onChange={(e) => handleUpdateStatus(order.id, e.target.value as OrderStatus)}
+                        className={`text-xs font-bold px-3 py-2 rounded-full border-none outline-none cursor-pointer ${statusMap[order.status]?.color}`}
+                      >
+                        {Object.entries(statusMap).map(([val, meta]) => (
+                          <option key={val} value={val}>
+                            {meta.label}
+                          </option>
+                        ))}
+                      </select>
+                    </td>
+
+                    <td className="px-6 py-4 text-sm font-bold text-gray-900">
+                      {formatCOP(order.total)}
+                    </td>
+
+                    <td className="px-6 py-4 text-right space-x-2">
+                      <button
+                        onClick={() => setSelectedOrder(order)}
+                        className="text-gray-400 hover:text-indigo-600 p-2"
+                        title="Ver detalles"
+                      >
+                        <i className="fa-solid fa-eye"></i>
+                      </button>
+
+                      <a
+                        href={waTo(order.customer?.phone || "")}
+                        target="_blank"
+                        rel="noreferrer"
+                        className="text-gray-400 hover:text-green-600 p-2 inline-block"
+                        title="WhatsApp cliente"
+                      >
+                        <i className="fa-brands fa-whatsapp"></i>
+                      </a>
+
+                      <button
+                        onClick={() => handleDeleteOrder(order.id)}
+                        className="text-gray-400 hover:text-red-600 p-2"
+                        title="Eliminar"
+                      >
+                        <i className="fa-solid fa-trash-can"></i>
+                      </button>
+                    </td>
+                  </tr>
+                ))}
+
+                {filteredOrders.length === 0 && (
+                  <tr>
+                    <td colSpan={5} className="px-6 py-12 text-center text-gray-500 italic">
+                      No hay pedidos para este filtro.
+                    </td>
+                  </tr>
+                )}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
+
+      {/* Order Detail Modal */}
+      {selectedOrder && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+          <div
+            className="absolute inset-0 bg-black/50 backdrop-blur-sm"
+            onClick={() => setSelectedOrder(null)}
+          ></div>
+
+          <div className="relative bg-white w-full max-w-3xl rounded-2xl shadow-2xl flex flex-col max-h-[90vh]">
+            <div className="p-6 border-b flex justify-between items-center">
+              <div>
+                <h3 className="text-xl font-bold">Pedido #{selectedOrder.id.substring(0, 8)}</h3>
+                <div className="text-xs text-gray-400 mt-1">{formatDate(selectedOrder.createdAt)}</div>
+              </div>
+
+              <button onClick={() => setSelectedOrder(null)} className="text-gray-400 hover:text-gray-600">
+                <i className="fa-solid fa-xmark text-xl"></i>
+              </button>
+            </div>
+
+            <div className="p-6 overflow-y-auto space-y-6">
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                <div>
+                  <h4 className="text-xs font-bold uppercase text-gray-400 mb-2">Entrega</h4>
+                  <div className="space-y-1 text-sm">
+                    <p>
+                      <strong>Nombre:</strong> {selectedOrder.customer?.name}
+                    </p>
+                    <p>
+                      <strong>Teléfono:</strong> {selectedOrder.customer?.phone}
+                    </p>
+                    <p>
+                      <strong>Dirección:</strong> {selectedOrder.customer?.address}
+                    </p>
+                    {selectedOrder.notes ? (
+                      <p className="text-gray-500">
+                        <strong>Notas:</strong> {selectedOrder.notes}
+                      </p>
+                    ) : null}
+                  </div>
+                </div>
+
+                <div>
+                  <h4 className="text-xs font-bold uppercase text-gray-400 mb-2">Estado</h4>
+                  <div className="flex items-center gap-3">
+                    <span className={`px-3 py-1 rounded-full text-xs font-bold ${statusMap[selectedOrder.status].color}`}>
+                      {statusMap[selectedOrder.status].label}
+                    </span>
+                    <a
+                      href={waTo(selectedOrder.customer?.phone || "", `Hola ${selectedOrder.customer?.name || ""}, sobre tu pedido #${selectedOrder.id.substring(0, 8)}...`)}
+                      target="_blank"
+                      rel="noreferrer"
+                      className="text-green-600 text-sm font-semibold"
+                    >
+                      WhatsApp cliente
+                    </a>
+                  </div>
+                </div>
+              </div>
+
+              <div>
+                <h4 className="text-xs font-bold uppercase text-gray-400 mb-3">Productos</h4>
+                <div className="bg-gray-50 rounded-xl overflow-hidden border border-gray-100">
+                  <table className="w-full text-left text-sm">
+                    <thead>
+                      <tr className="bg-gray-100 text-gray-500 text-[10px] uppercase font-bold">
+                        <th className="px-4 py-2">Item</th>
+                        <th className="px-4 py-2 text-center">Cant.</th>
+                        <th className="px-4 py-2 text-right">Precio</th>
+                        <th className="px-4 py-2 text-right">Subtotal</th>
+                      </tr>
+                    </thead>
+
+                    <tbody className="divide-y divide-gray-200">
+                      {selectedOrder.items.map((item, idx) => (
+                        <tr key={idx}>
+                          <td className="px-4 py-3 text-gray-700 font-medium">
+                            <div>{item.productName}</div>
+                            {item.variantTitle ? (
+                              <div className="text-xs text-gray-400">{item.variantTitle}</div>
+                            ) : null}
+                          </td>
+                          <td className="px-4 py-3 text-center">{item.qty}</td>
+                          <td className="px-4 py-3 text-right">{formatCOP(item.unitPrice)}</td>
+                          <td className="px-4 py-3 text-right">{formatCOP(item.subtotal)}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+
+                    <tfoot>
+                      <tr className="bg-indigo-50 font-bold text-indigo-700">
+                        <td colSpan={3} className="px-4 py-3 text-right">
+                          TOTAL
+                        </td>
+                        <td className="px-4 py-3 text-right">{formatCOP(selectedOrder.total)}</td>
+                      </tr>
+                    </tfoot>
+                  </table>
+                </div>
+              </div>
+            </div>
+
+            <div className="p-6 border-t flex justify-end gap-2">
+              <button
+                onClick={() => setSelectedOrder(null)}
+                className="px-6 py-2 bg-gray-100 text-gray-600 rounded-lg hover:bg-gray-200 font-bold transition-all"
+              >
+                Cerrar
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+};
+
+export default OrdersView;
