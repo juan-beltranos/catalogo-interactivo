@@ -1,6 +1,5 @@
-
 import React, { useState } from 'react';
-import { signInWithEmailAndPassword } from 'firebase/auth';
+import { signInWithEmailAndPassword, sendPasswordResetEmail } from 'firebase/auth'; // NEW
 import { auth } from '../../lib/firebase';
 import { useNavigate, Navigate } from 'react-router-dom';
 import { useAuth } from '../../context/AuthContext';
@@ -9,8 +8,9 @@ const LoginView: React.FC = () => {
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [error, setError] = useState('');
+  const [success, setSuccess] = useState(''); // NEW
   const [loading, setLoading] = useState(false);
-  
+
   const navigate = useNavigate();
   const { user, loading: authLoading } = useAuth();
 
@@ -20,6 +20,7 @@ const LoginView: React.FC = () => {
   const handleLogin = async (e: React.FormEvent) => {
     e.preventDefault();
     setError('');
+    setSuccess(''); // NEW
     setLoading(true);
 
     try {
@@ -30,6 +31,38 @@ const LoginView: React.FC = () => {
       setError('Credenciales inválidas. Por favor intenta de nuevo.');
     } finally {
       setLoading(false);
+    }
+  };
+
+  // NEW: reset password
+  const handleForgotPassword = async () => {
+    setError('');
+    setSuccess('');
+
+    if (!email) {
+      setError('Escribe tu correo arriba para enviarte el enlace de recuperación.');
+      return;
+    }
+
+    try {
+      // Opcional: actionCodeSettings para controlar a dónde vuelve el usuario
+      // Si no lo pones, Firebase usa el flujo por defecto.
+      await sendPasswordResetEmail(auth, email /*, actionCodeSettings */);
+
+      setSuccess('Listo. Te enviamos un correo para restablecer tu contraseña (revisa spam).');
+    } catch (err: any) {
+      console.error(err);
+
+      // Mensajes típicos
+      if (err.code === 'auth/user-not-found') {
+        setError('No existe una cuenta con ese correo.');
+      } else if (err.code === 'auth/invalid-email') {
+        setError('El correo no es válido.');
+      } else if (err.code === 'auth/too-many-requests') {
+        setError('Demasiados intentos. Intenta de nuevo más tarde.');
+      } else {
+        setError('No se pudo enviar el correo de recuperación. Intenta de nuevo.');
+      }
     }
   };
 
@@ -45,6 +78,13 @@ const LoginView: React.FC = () => {
           <div className="mb-4 p-3 bg-red-50 border border-red-200 text-red-600 text-sm rounded-lg flex items-center gap-2">
             <i className="fa-solid fa-circle-exclamation"></i>
             {error}
+          </div>
+        )}
+
+        {success && (
+          <div className="mb-4 p-3 bg-green-50 border border-green-200 text-green-700 text-sm rounded-lg flex items-center gap-2">
+            <i className="fa-solid fa-circle-check"></i>
+            {success}
           </div>
         )}
 
@@ -75,6 +115,17 @@ const LoginView: React.FC = () => {
               className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-transparent outline-none transition-all"
               placeholder="••••••••"
             />
+          </div>
+
+          {/* NEW: forgot password */}
+          <div className="text-right">
+            <button
+              type="button"
+              onClick={handleForgotPassword}
+              className="text-sm text-indigo-600 hover:text-indigo-700 font-medium"
+            >
+              ¿Olvidaste tu contraseña?
+            </button>
           </div>
 
           <button
