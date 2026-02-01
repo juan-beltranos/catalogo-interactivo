@@ -10,6 +10,11 @@ export interface Product {
     options: ProductOption[];
     variants: Variant[];
     videos?: VideoItem[];
+    discount?: {
+        type: "percent" | "amount";
+        value: number;
+    } | null;
+    sku?: string | null;
 }
 
 export interface Store {

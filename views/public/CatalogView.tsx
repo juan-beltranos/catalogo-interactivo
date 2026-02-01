@@ -12,12 +12,19 @@ import {
   doc,
   runTransaction,
   increment,
+  QueryDocumentSnapshot,
+  DocumentData,
+  startAfter,
 } from "firebase/firestore";
 import { db } from "../../lib/firebase";
 import { Product, Store } from "@/interfaces";
 import { CartItem, Category, Variant } from "@/types";
 import { buildWaLink, calcTotal, cartStorageKey, formatCOP, getProductDisplayPrice, getProductMainImage, norm } from "@/helpers";
 import { ImageCarousel } from "@/components/catalog/ImageCarousel";
+import { cldImg } from "@/helpers/cloudinaryUpload";
+
+const PAGE_SIZE = 20;
+
 
 const CatalogView: React.FC = () => {
   const { slug } = useParams<{ slug: string }>();
@@ -40,7 +47,13 @@ const CatalogView: React.FC = () => {
   const [activeCategoryId, setActiveCategoryId] = useState<string>("all");
 
   const [search, setSearch] = useState("");
+  const [queryError, setQueryError] = useState<string | null>(null);
 
+
+  const [loadingMore, setLoadingMore] = useState(false);
+  const [hasMore, setHasMore] = useState(false);
+  const [lastDoc, setLastDoc] =
+    useState<QueryDocumentSnapshot<DocumentData> | null>(null);
 
   // Variant picker modal
   const [productModal, setProductModal] = useState<{
@@ -78,18 +91,12 @@ const CatalogView: React.FC = () => {
       const priceText = `${p.price ?? ""} ${(p.variants || []).map((v: any) => v.price ?? "").join(" ")}`;
 
       const haystack = norm(
-        `${p.name} ${p.description} ${catName} ${variantsText} ${priceText}`
+        `${p.name} ${p.sku ?? ""} ${p.description} ${catName} ${variantsText} ${priceText}`
       );
 
       return haystack.includes(q);
     });
   }, [products, activeCategoryId, search, categoryNameById]);
-
-
-  const categoriesWithProducts = useMemo(() => {
-    const ids = new Set(products.map((p) => p.categoryId));
-    return categories.filter((c) => ids.has(c.id));
-  }, [categories, products]);
 
   useEffect(() => {
     if (!categories.length) return;
@@ -142,21 +149,16 @@ const CatalogView: React.FC = () => {
   useEffect(() => {
     if (!store) return;
 
-    const qCats = query(collection(db, "stores", store.id, "categories"), orderBy("order", "asc"));
+    const qCats = query(
+      collection(db, "stores", store.id, "categories"),
+      orderBy("order", "asc")
+    );
+
     const unsubscribeCats = onSnapshot(qCats, (snap) => {
       setCategories(snap.docs.map((d) => ({ id: d.id, ...(d.data() as any) })));
     });
 
-    const qProds = query(collection(db, "stores", store.id, "products"), orderBy("createdAt", "desc"));
-    const unsubscribeProds = onSnapshot(qProds, (snap) => {
-      setProducts(snap.docs.map((d) => ({ id: d.id, ...(d.data() as any) })) as Product[]);
-      setLoading(false);
-    });
-
-    return () => {
-      unsubscribeCats();
-      unsubscribeProds();
-    };
+    return () => unsubscribeCats();
   }, [store]);
 
   const addToCart = (prod: Product, variant?: Variant) => {
@@ -332,6 +334,148 @@ const CatalogView: React.FC = () => {
     }
   };
 
+  const getDiscountBadge = (p: Product) => {
+    const d = p.discount;
+    if (!d || !d.value) return null;
+
+    if (d.type === "percent") {
+      const pct = Math.min(100, Math.max(0, Number(d.value) || 0));
+      if (!pct) return null;
+      return `-${pct}%`;
+    }
+
+    const amt = Math.max(0, Number(d.value) || 0);
+    if (!amt) return null;
+    return `-${formatCOP(amt)}`;
+  };
+
+  const getFinalPriceNumber = (p: Product) => {
+    const base = Number(p.price || 0);
+    const d = p.discount;
+
+    if (!d || !d.value) return base;
+
+    if (d.type === "percent") {
+      const pct = Math.min(100, Math.max(0, Number(d.value) || 0));
+      return Math.max(0, Math.round(base * (1 - pct / 100)));
+    }
+
+    const amt = Math.max(0, Number(d.value) || 0);
+    return Math.max(0, base - amt);
+  };
+
+  const hasValidDiscount = (p: Product) => {
+    const d = p.discount;
+    if (!d || !d.value) return false;
+    if (d.type === "percent") return Number(d.value) > 0;
+    return Number(d.value) > 0;
+  };
+
+  const fetchFirstPage = async () => {
+    if (!store) return;
+
+    setLoading(true);
+    setQueryError(null);
+
+    try {
+      const baseRef = collection(db, "stores", store.id, "products");
+
+      const constraints: any[] = [
+        orderBy("createdAt", "desc"),
+        limit(PAGE_SIZE + 1),
+      ];
+
+      if (activeCategoryId !== "all") {
+        constraints.unshift(where("categoryId", "==", activeCategoryId));
+      }
+
+      const qProds = query(baseRef, ...constraints);
+      const snap = await getDocs(qProds);
+      const docs = snap.docs;
+
+      const more = docs.length > PAGE_SIZE;
+      const pageDocs = more ? docs.slice(0, PAGE_SIZE) : docs;
+
+      setProducts(pageDocs.map((d) => ({ id: d.id, ...(d.data() as any) })) as Product[]);
+      setHasMore(more);
+      setLastDoc(pageDocs[pageDocs.length - 1] ?? null);
+    } catch (e: any) {
+      console.error("fetchFirstPage error:", e);
+
+      // Mensaje amigable si es índice faltante
+      const msg =
+        String(e?.message || "").toLowerCase().includes("index")
+          ? "Falta un índice en Firestore para filtrar por categoría. Revisa la consola (hay un link automático para crearlo)."
+          : "Error consultando productos. Revisa la consola.";
+
+      setQueryError(msg);
+
+      setProducts([]);
+      setHasMore(false);
+      setLastDoc(null);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const fetchMorePage = async () => {
+    if (!store || !lastDoc || !hasMore || loadingMore) return;
+
+    setLoadingMore(true);
+    setQueryError(null);
+
+    try {
+      const baseRef = collection(db, "stores", store.id, "products");
+
+      const constraints: any[] = [
+        orderBy("createdAt", "desc"),
+        startAfter(lastDoc),
+        limit(PAGE_SIZE + 1),
+      ];
+
+      if (activeCategoryId !== "all") {
+        constraints.unshift(where("categoryId", "==", activeCategoryId));
+      }
+
+      const qMore = query(baseRef, ...constraints);
+
+      const snap = await getDocs(qMore);
+      const docs = snap.docs;
+
+      const more = docs.length > PAGE_SIZE;
+      const pageDocs = more ? docs.slice(0, PAGE_SIZE) : docs;
+
+      setProducts((prev) => [
+        ...prev,
+        ...(pageDocs.map((d) => ({ id: d.id, ...(d.data() as any) })) as Product[]),
+      ]);
+
+      setHasMore(more);
+      setLastDoc(pageDocs[pageDocs.length - 1] ?? lastDoc);
+    } catch (e: any) {
+      console.error("fetchMorePage error:", e);
+
+      const msg =
+        String(e?.message || "").toLowerCase().includes("index")
+          ? "Falta un índice en Firestore para paginar por categoría. Revisa la consola para crearlo."
+          : "Error cargando más productos. Revisa la consola.";
+
+      setQueryError(msg);
+    } finally {
+      setLoadingMore(false);
+    }
+  };
+
+  useEffect(() => {
+    if (!store) return;
+
+    setProducts([]);
+    setLastDoc(null);
+    setHasMore(false);
+
+    fetchFirstPage();
+  }, [store?.id, activeCategoryId]);
+
   if (loading) return <div className="h-screen flex items-center justify-center">Cargando catálogo...</div>;
   if (!store) return <div className="h-screen flex items-center justify-center">Tienda no encontrada.</div>;
 
@@ -354,7 +498,7 @@ const CatalogView: React.FC = () => {
                   />
                 </div>
               ) : (
-                <div className="h-12 w-12 rounded-2xl bg-indigo-600 text-white font-extrabold flex items-center justify-center shadow-sm">
+                <div className="h-12 w-12 rounded-2xl bg-black text-white font-extrabold flex items-center justify-center shadow-sm">
                   {(store.name || "T").trim().slice(0, 1).toUpperCase()}
                 </div>
               )}
@@ -374,13 +518,13 @@ const CatalogView: React.FC = () => {
             <div className="ml-auto flex items-center gap-2">
               <button
                 onClick={() => setCheckoutOpen(true)}
-                className="relative inline-flex items-center gap-2 rounded-full bg-indigo-600 text-white px-4 py-2 font-extrabold shadow-sm hover:bg-indigo-700 active:scale-[0.99] transition"
+                className="relative inline-flex items-center gap-2 rounded-full bg-black text-white px-4 py-2 font-extrabold shadow-sm hover:bg-indigo-700 active:scale-[0.99] transition"
               >
                 <i className="fa-solid fa-cart-shopping" />
                 <span className="text-sm hidden sm:inline">Carrito</span>
 
                 {cart.length > 0 ? (
-                  <span className="ml-1 inline-flex items-center justify-center min-w-6 h-6 px-2 rounded-full bg-white text-indigo-700 text-xs font-black">
+                  <span className="ml-1 inline-flex items-center justify-center min-w-6 h-6 px-2 rounded-full bg-white text-black text-xs font-black">
                     {cart.reduce((a, b) => a + b.qty, 0)}
                   </span>
                 ) : null}
@@ -403,21 +547,21 @@ const CatalogView: React.FC = () => {
               onClick={() => setActiveCategoryId("all")}
               className={`shrink-0 px-4 py-2 rounded-full text-sm font-extrabold border transition
           ${activeCategoryId === "all"
-                  ? "bg-indigo-600 text-white border-indigo-600"
+                  ? "bg-black text-white border-indigo-600"
                   : "bg-white text-gray-700 border-gray-200 hover:bg-gray-50"
                 }`}
             >
               Todo
             </button>
 
-            {(categoriesWithProducts.length ? categoriesWithProducts : categories).map((cat) => (
+            {categories.map((cat) => (
               <button
                 key={cat.id}
                 type="button"
                 onClick={() => setActiveCategoryId(cat.id)}
                 className={`shrink-0 px-4 py-2 rounded-full text-sm font-extrabold border transition
             ${activeCategoryId === cat.id
-                    ? "bg-indigo-600 text-white border-indigo-600"
+                    ? "bg-black text-white border-indigo-600"
                     : "bg-white text-gray-700 border-gray-200 hover:bg-gray-50"
                   }`}
               >
@@ -467,7 +611,7 @@ const CatalogView: React.FC = () => {
             <button
               type="button"
               onClick={() => setActiveCategoryId("all")}
-              className="text-sm font-extrabold text-indigo-700 hover:text-indigo-900"
+              className="text-sm font-extrabold  hover:text-indigo-900"
             >
               Ver todo
             </button>
@@ -483,8 +627,13 @@ const CatalogView: React.FC = () => {
           <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-3 sm:gap-4">
             {filteredProducts.map((prod) => {
               const img = getProductMainImage(prod);
+              const imgOptim = img ? cldImg(img, { w: 600, h: 600, crop: "fill" }) : "";
               const priceInfo = getProductDisplayPrice(prod);
               const hasVariants = (prod.variants?.length ?? 0) > 0;
+              const badge = getDiscountBadge(prod);
+              const hasDisc = hasValidDiscount(prod);
+              const finalPriceNum = getFinalPriceNumber(prod);
+
 
               return (
                 <div
@@ -493,39 +642,59 @@ const CatalogView: React.FC = () => {
                 >
                   <div className="relative aspect-square bg-gray-100 overflow-hidden">
                     {img ? (
-                      <>
-                        {/* fondo relleno (borroso) */}
-                        <img
-                          src={img}
-                          alt=""
-                          className="absolute inset-0 h-full w-full object-cover blur-md scale-110 opacity-60"
-                          aria-hidden="true"
-                        />
-                        <img
-                          src={img}
-                          alt={prod.name}
-                          className="relative z-10 h-full w-full object-contain"
-                          loading="lazy"
-                        />
-                      </>
+                      <img
+                        src={imgOptim}
+                        alt={prod.name}
+                        className="relative z-10 h-full w-full object-contain"
+                        loading="lazy"
+                        decoding="async"
+                      />
                     ) : (
                       <div className="h-full w-full flex items-center justify-center text-gray-400">
                         <i className="fa-regular fa-image text-2xl" />
                       </div>
                     )}
 
+                    {/* Badge descuento */}
+                    {badge ? (
+                      <div className="absolute top-3 left-3 z-20">
+                        <span className="inline-flex items-center rounded-full bg-yellow-400 text-white px-3 py-1 text-xs font-extrabold shadow-sm">
+                          {badge}
+                        </span>
+                      </div>
+                    ) : null}
+
+                    {/* Label precio (tu label actual) */}
                     <div className="absolute left-3 bottom-3 z-20">
-                      <span className="inline-flex items-center rounded-full bg-white/90 backdrop-blur px-3 py-1 text-xs font-extrabold text-indigo-700 border border-indigo-50 shadow-sm">
+                      <span className="inline-flex items-center rounded-full bg-white/90 backdrop-blur px-3 py-1 text-xs font-extrabold  border border-indigo-50 shadow-sm">
                         {priceInfo.label}
                       </span>
                     </div>
                   </div>
 
-
                   <div className="p-3 sm:p-4 flex-1 flex flex-col">
-                    <h3 className="text-sm sm:text-[15px] font-extrabold text-gray-900 line-clamp-1">
-                      {prod.name}
-                    </h3>
+                    <div className="flex flex-col gap-1">
+                      <div className="flex items-start justify-between gap-2">
+                        <h3 className="text-sm sm:text-[15px] font-extrabold text-gray-900 ">
+                          {prod.name}
+                        </h3>
+
+                        {/* En pantallas sm+ mantenemos el SKU al lado */}
+                        {prod.sku ? (
+                          <span className="hidden sm:inline-flex shrink-0 text-[10px] font-bold text-gray-500 bg-gray-100 border border-gray-200 rounded-full px-2 py-1">
+                            SKU: {prod.sku}
+                          </span>
+                        ) : null}
+                      </div>
+
+                      {/* En móvil mostramos el SKU debajo para que no corte el nombre */}
+                      {prod.sku ? (
+                        <span className="sm:hidden inline-flex w-fit text-[10px] font-bold text-gray-500 bg-gray-100 border border-gray-200 rounded-full px-2 py-1">
+                          SKU: {prod.sku}
+                        </span>
+                      ) : null}
+                    </div>
+
 
                     {prod.description ? (
                       <p className="text-xs text-gray-500 mt-1 line-clamp-2">
@@ -535,10 +704,31 @@ const CatalogView: React.FC = () => {
                       <p className="text-xs text-gray-400 mt-1 line-clamp-2">&nbsp;</p>
                     )}
 
+                    {/* Precio tachado + final (solo si NO hay variantes) */}
+                    {/* {!hasVariants ? (
+                      <div className="mt-2">
+                        {hasDisc ? (
+                          <div className="flex items-baseline gap-2">
+                            <span className="text-xs text-gray-400 line-through font-bold">
+                              {formatCOP(Number(prod.price || 0))}
+                            </span>
+                            <span className="text-sm font-extrabold ">
+                              {formatCOP(finalPriceNum)}
+                            </span>
+                          </div>
+                        ) : (
+                          <div className="text-sm font-extrabold ">
+                            {formatCOP(Number(prod.price || 0))}
+                          </div>
+                        )}
+                      </div>
+                    ) : null} */}
+
+
                     <button
                       onClick={() => openAddFlow(prod)}
                       className="mt-3 w-full rounded-xl py-2.5 text-xs sm:text-sm font-extrabold
-                bg-indigo-600 text-white hover:bg-indigo-700 active:scale-[0.99] transition"
+                      bg-black text-white hover:bg-indigo-700 active:scale-[0.99] transition"
                     >
                       {hasVariants ? "Elegir variante" : "Añadir al carrito"}
                     </button>
@@ -550,10 +740,23 @@ const CatalogView: React.FC = () => {
                     ) : null}
                   </div>
                 </div>
+
               );
             })}
           </div>
         )}
+
+        {hasMore ? (
+          <div className="flex justify-center">
+            <button
+              onClick={fetchMorePage}
+              disabled={loadingMore}
+              className="px-5 py-3 rounded-2xl font-extrabold border bg-white hover:bg-gray-50 disabled:opacity-60"
+            >
+              {loadingMore ? "Cargando..." : "Cargar más"}
+            </button>
+          </div>
+        ) : null}
 
       </main>
 
@@ -625,7 +828,7 @@ const CatalogView: React.FC = () => {
               {/* Price */}
               <div className="flex items-center justify-between">
                 <div className="text-sm text-gray-500">Precio</div>
-                <div className="font-extrabold text-indigo-700">
+                <div className="font-extrabold ">
                   {getProductDisplayPrice(productModal.product).label}
                 </div>
               </div>
@@ -659,7 +862,7 @@ const CatalogView: React.FC = () => {
                               {typeof v.stock === "number" ? (outOfStock ? "Agotado" : `Stock: ${v.stock}`) : "Stock no definido"}
                             </div>
                           </div>
-                          <div className="font-extrabold text-indigo-700">
+                          <div className="font-extrabold ">
                             {formatCOP(Number(v.price || 0))}
                           </div>
                         </button>
@@ -688,7 +891,7 @@ const CatalogView: React.FC = () => {
 
                   setProductModal({ open: false, product: null, selectedVariantId: null });
                 }}
-                className="w-full rounded-2xl py-3 font-extrabold bg-indigo-600 text-white hover:bg-indigo-700"
+                className="w-full rounded-2xl py-3 font-extrabold bg-black text-white hover:bg-indigo-700"
               >
                 Añadir al carrito
               </button>
@@ -708,7 +911,7 @@ const CatalogView: React.FC = () => {
       {/* Checkout Drawer (móvil) + Modal (desktop) */}
       {checkoutOpen && (
         <div className="fixed inset-0 z-50 bg-black/50 flex items-end sm:items-center justify-center">
-          <div className="w-full sm:max-w-xl bg-white rounded-t-3xl sm:rounded-3xl max-h-[90vh] overflow-hidden shadow-2xl">
+          <div className="w-full sm:max-w-xl bg-white rounded-t-3xl sm:rounded-3xl h-full overflow-hidden shadow-2xl">
             {/* header */}
             <div className="p-4 sm:p-6 border-b flex items-start justify-between gap-3">
               <div>
@@ -738,16 +941,8 @@ const CatalogView: React.FC = () => {
                       <div className="w-16 h-16 rounded-2xl bg-gray-100 overflow-hidden border relative">
                         {it.imageUrl ? (
                           <>
-                            {/* fondo borroso */}
                             <img
-                              src={it.imageUrl}
-                              alt=""
-                              className="absolute inset-0 w-full h-full object-cover blur-sm scale-110 opacity-60"
-                              aria-hidden="true"
-                            />
-
-                            <img
-                              src={it.imageUrl}
+                              src={it.imageUrl ? cldImg(it.imageUrl, { w: 160, h: 160, crop: "fill" }) : ""}
                               alt={it.productName}
                               className="relative z-10 w-full h-full object-contain"
                               loading="lazy"
@@ -765,7 +960,7 @@ const CatalogView: React.FC = () => {
                         {it.variantTitle ? (
                           <div className="text-xs text-gray-500">{it.variantTitle}</div>
                         ) : null}
-                        <div className="text-sm text-indigo-700 font-extrabold mt-1">
+                        <div className="text-sm  font-extrabold mt-1">
                           {formatCOP(it.unitPrice)}
                         </div>
                         <div className="text-xs text-gray-500 mt-1">
@@ -801,7 +996,7 @@ const CatalogView: React.FC = () => {
               {cart.length > 0 ? (
                 <div className="mt-5 flex items-center justify-between border-t pt-4">
                   <div className="font-extrabold text-gray-900">Total</div>
-                  <div className="font-black text-indigo-700 text-lg">{formatCOP(total)}</div>
+                  <div className="font-black  text-lg">{formatCOP(total)}</div>
                 </div>
               ) : null}
 
@@ -870,7 +1065,7 @@ const CatalogView: React.FC = () => {
                 <button
                   type="button"
                   onClick={placeOrder}
-                  className="flex-1 rounded-2xl p-3 font-extrabold bg-indigo-600 text-white hover:bg-indigo-700 disabled:opacity-60"
+                  className="flex-1 rounded-2xl p-3 font-extrabold bg-black text-white hover:bg-indigo-700 disabled:opacity-60"
                   disabled={placingOrder || cart.length === 0}
                 >
                   {placingOrder ? "Enviando..." : "Enviar a WhatsApp"}

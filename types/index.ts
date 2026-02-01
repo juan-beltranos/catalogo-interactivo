@@ -1,4 +1,12 @@
-export type ImageItem = { url: string; path: string };
+export type ImageItem = {
+    url: string;        // secure_url
+    publicId: string;   // public_id (lo usas para borrar)
+    width?: number;
+    height?: number;
+    format?: string;
+    bytes?: number;
+};
+
 
 export type ProductOption = {
     name: string;      // e.g. "Color"
@@ -89,4 +97,31 @@ export type VideoItem = {
     durationSec?: number;
     optimizedUrl?: string;
     originalUrl?: string;
+};
+
+
+export type UploadResult = {
+    secure_url: string;
+    public_id: string;
+    width?: number;
+    height?: number;
+    format?: string;
+    bytes?: number;
+};
+
+export type SignedPayload = {
+    cloudName: string;
+    apiKey: string;
+    timestamp: number;
+    signature: string;
+    folder: string;
+    overwrite: boolean;
+};
+
+export type CloudImageItem = {
+    url: string;          
+    publicId: string;     
+    width?: number;
+    height?: number;
+    bytes?: number;
 };

@@ -105,3 +105,4 @@ export const norm = (s: any) =>
         .normalize("NFD")
         .replace(/[\u0300-\u036f]/g, "")
         .trim();
+

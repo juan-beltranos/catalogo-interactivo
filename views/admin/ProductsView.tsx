@@ -18,8 +18,7 @@ import {
   limit,
   limitToLast,
 } from "firebase/firestore";
-import { ref, uploadBytes, getDownloadURL, deleteObject } from "firebase/storage";
-import { db, storage } from "../../lib/firebase";
+import { db } from "../../lib/firebase";
 import { useAuth } from "../../context/AuthContext";
 import { Product } from "@/interfaces";
 import { ImageItem, ProductOption, Variant, VideoItem } from "@/types";
@@ -28,6 +27,10 @@ import VariantsEditor from "@/components/admin/VariantsEditor";
 import { compressImage } from "@/helpers/imageCompression";
 import { MAX_VIDEO_MB, validateVideoFile } from "@/helpers/videoValidation";
 import Paginator from "@/components/catalog/Paginator";
+import { deleteCloudinaryAsset, cldImg, uploadImageToCloudinary } from "@/helpers/cloudinaryUpload";
+import { ref, uploadBytes, getDownloadURL, deleteObject } from "firebase/storage";
+import { storage } from "../../lib/firebase";
+import ImportProductsExcel from "@/components/catalog/ImportProductsExcel";
 
 const PAGE_SIZE = 20;
 
@@ -57,6 +60,11 @@ const ProductsView: React.FC = () => {
   const [categoryId, setCategoryId] = useState("");
   const [imageFiles, setImageFiles] = useState<File[]>([]);
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const [sku, setSku] = useState("");
+  const [hasDiscount, setHasDiscount] = useState(false);
+  const [discountType, setDiscountType] = useState<"percent" | "amount">("percent");
+  const [discountValueInput, setDiscountValueInput] = useState(""); // "10" o "20000"
+
 
   // Variants (create)
   const [useVariants, setUseVariants] = useState(false);
@@ -64,11 +72,25 @@ const ProductsView: React.FC = () => {
 
 
   // Edit modal
+  const [editSku, setEditSku] = useState("");
+  const [editHasDiscount, setEditHasDiscount] = useState(false);
+  const [editDiscountType, setEditDiscountType] =
+    useState<"percent" | "amount">("percent");
+  const [editDiscountValueInput, setEditDiscountValueInput] = useState("");
+
   const [editingProduct, setEditingProduct] = useState<Product | null>(null);
   const [editPriceInput, setEditPriceInput] = useState("");
 
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const [videoFiles, setVideoFiles] = useState<File[]>([]);
+
+  const [uploading, setUploading] = useState(false);
+  const [uploadProgress, setUploadProgress] = useState({
+    total: 0,
+    done: 0,
+    currentName: "",
+  });
+
 
   // 1) storeId del usuario actual
   useEffect(() => {
@@ -101,6 +123,7 @@ const ProductsView: React.FC = () => {
 
     const qCats = query(catsRef, orderBy("name", "asc"));
     const unsubCats = onSnapshot(qCats, (snap) => {
+      //@ts-ignore
       setCategories(snap.docs.map((d) => ({ id: d.id, name: d.data().name })));
     });
 
@@ -117,22 +140,33 @@ const ProductsView: React.FC = () => {
   const uploadImages = async (files: File[]): Promise<ImageItem[]> => {
     if (!storeId || !files.length) return [];
 
-    const uploaded: ImageItem[] = [];
+    setUploading(true);
+    setUploadProgress({ done: 0, total: files.length, currentName: "" });
 
-    for (const f of files) {
-      const optimized = await compressImage(f);
+    try {
+      const uploaded: ImageItem[] = [];
 
-      const filename = `${Date.now()}_${Math.random().toString(36).slice(2, 8)}.jpg`;
-      const path = `stores/${storeId}/products/${filename}`;
-      const storageRef = ref(storage, path);
+      for (let i = 0; i < files.length; i++) {
+        const f = files[i];
+        setUploadProgress({ done: i, total: files.length, currentName: f.name });
 
-      await uploadBytes(storageRef, optimized);
-      const url = await getDownloadURL(storageRef);
+        // ✅ Sí: aquí sigues optimizando ANTES de subir (tu compressImage)
+        const optimizedBlob = await compressImage(f);
+        const optimizedFile = new File([optimizedBlob], f.name.replace(/\.\w+$/, ".jpg"), { type: "image/jpeg" });
 
-      uploaded.push({ url, path });
+        const up = await uploadImageToCloudinary(storeId, optimizedFile);
+
+        uploaded.push({
+          url: up.url,
+          publicId: up.publicId,
+        });
+      }
+
+      setUploadProgress({ done: files.length, total: files.length, currentName: "" });
+      return uploaded;
+    } finally {
+      setUploading(false);
     }
-
-    return uploaded;
   };
 
   const uploadVideos = async (files: File[]): Promise<VideoItem[]> => {
@@ -170,6 +204,10 @@ const ProductsView: React.FC = () => {
     setDescription("");
     setPriceInput("");
     setCategoryId("");
+    setSku("");
+    setHasDiscount(false);
+    setDiscountType("percent");
+    setDiscountValueInput("");
     setImageFiles([]);
     setVideoFiles([]);
     setUseVariants(false);
@@ -193,10 +231,24 @@ const ProductsView: React.FC = () => {
 
       const variants = useVariants ? (createVariants || []) : [];
 
+      const cleanSku = sku.trim() || null;
+
+      const discount =
+        hasDiscount && discountValueNum > 0
+          ? {
+            type: discountType, // "percent" | "amount"
+            value: discountType === "percent"
+              ? Math.min(100, Math.max(0, discountValueNum))
+              : Math.max(0, discountValueNum),
+          }
+          : null;
+
       await addDoc(prodsRef, {
         name: cleanName,
+        sku: cleanSku,
         description: description.trim(),
         price: basePrice,
+        discount,
         categoryId,
         images,
         videos,
@@ -206,6 +258,7 @@ const ProductsView: React.FC = () => {
         updatedAt: serverTimestamp(),
       });
 
+      await loadFirstPage();
       resetCreateForm();
       setCreateVariants([]);
     } catch (err) {
@@ -223,30 +276,22 @@ const ProductsView: React.FC = () => {
 
     try {
       for (const img of prod.images || []) {
-        if (img.path) {
+        if (img.publicId) {
           try {
-            await deleteObject(ref(storage, img.path));
+            await deleteCloudinaryAsset(storeId, img.publicId, "image");
           } catch (e) {
-            console.warn("No se pudo borrar imagen:", img.path, e);
-          }
-        }
-      }
-
-      for (const vid of (prod.videos || [])) {
-        if (vid.path) {
-          try {
-            await deleteObject(ref(storage, vid.path));
-          } catch (e) {
-            console.warn("No se pudo borrar video:", vid.path, e);
+            console.warn("No se pudo borrar imagen en Cloudinary:", img.publicId, e);
           }
         }
       }
 
       await deleteDoc(doc(db, "stores", storeId, "products", prod.id));
+      await loadFirstPage();
     } catch (err) {
       console.error(err);
       alert("Error al eliminar producto");
     }
+
   };
 
   // --- OPEN EDIT ---
@@ -254,6 +299,20 @@ const ProductsView: React.FC = () => {
     setEditingProduct(p);
     setEditPriceInput(String(p.price));
     setUseVariants((p.variants?.length ?? 0) > 0);
+
+    // SKU
+    setEditSku(p.sku ?? "");
+
+    // Discount
+    if (p.discount) {
+      setEditHasDiscount(true);
+      setEditDiscountType(p.discount.type);
+      setEditDiscountValueInput(String(p.discount.value));
+    } else {
+      setEditHasDiscount(false);
+      setEditDiscountType("percent");
+      setEditDiscountValueInput("");
+    }
   };
 
   const handleUpdateProduct = async (e: React.FormEvent) => {
@@ -265,10 +324,25 @@ const ProductsView: React.FC = () => {
       const basePrice = parseCOP(editPriceInput);
 
       const prodRef = doc(db, "stores", storeId, "products", editingProduct.id);
+      const cleanSku = editSku.trim() || null;
+
+      const discount =
+        editHasDiscount && editDiscountValueNum > 0
+          ? {
+            type: editDiscountType,
+            value:
+              editDiscountType === "percent"
+                ? Math.min(100, Math.max(0, editDiscountValueNum))
+                : Math.max(0, editDiscountValueNum),
+          }
+          : null;
+
       await updateDoc(prodRef, {
         name: editingProduct.name.trim(),
+        sku: cleanSku,
         description: (editingProduct.description ?? "").trim(),
         price: basePrice,
+        discount,
         categoryId: editingProduct.categoryId,
         options: [],
         variants: useVariants ? (editingProduct.variants ?? []) : [],
@@ -277,7 +351,7 @@ const ProductsView: React.FC = () => {
         updatedAt: serverTimestamp(),
       });
 
-
+      await loadFirstPage();
       setEditingProduct(null);
     } catch (err) {
       console.error(err);
@@ -301,19 +375,26 @@ const ProductsView: React.FC = () => {
 
   // --- REMOVE one image from edit modal (and storage) ---
   const removeImageFromEdit = async (index: number) => {
-    if (!editingProduct) return;
+    if (!editingProduct || !storeId) return;
+
     const img = editingProduct.images?.[index];
     if (!img) return;
 
     if (!window.confirm("¿Eliminar esta imagen?")) return;
 
     try {
-      if (img.path) await deleteObject(ref(storage, img.path));
+      // 1) borrar en Cloudinary vía Function
+      if (img.publicId) {
+        await deleteCloudinaryAsset(storeId, img.publicId, "image");
+      }
     } catch (e) {
-      console.warn("No se pudo borrar del storage", e);
+      console.warn("No se pudo borrar en Cloudinary", e);
+      // si quieres, puedes abortar aquí para no quitarla del UI:
+      // return;
     }
 
-    const next = [...editingProduct.images];
+    // 2) quitar del estado local (se guardará cuando le des “Guardar cambios”)
+    const next = [...(editingProduct.images || [])];
     next.splice(index, 1);
     setEditingProduct({ ...editingProduct, images: next });
   };
@@ -352,9 +433,12 @@ const ProductsView: React.FC = () => {
 
   const mapDocToProduct = (d: QueryDocumentSnapshot<DocumentData>) => {
     const data = d.data() as any;
+
     return {
       id: d.id,
       name: data.name ?? "",
+      sku: data.sku ?? null,             
+      discount: data.discount ?? null, 
       description: data.description ?? "",
       price: Number(data.price ?? 0),
       categoryId: data.categoryId ?? "",
@@ -364,6 +448,7 @@ const ProductsView: React.FC = () => {
       variants: (data.variants ?? []) as Variant[],
     } satisfies Product;
   };
+
 
   const loadPage = async (mode: "first" | "next" | "prev") => {
     if (!prodsRef) return;
@@ -420,14 +505,64 @@ const ProductsView: React.FC = () => {
     await loadPage("prev");
   };
 
+  const basePrice = parseCOP(priceInput);
+
+  const discountValueNum = Number((discountValueInput || "").replace(/[^\d]/g, "")) || 0;
+
+  const finalPrice = useMemo(() => {
+    if (!hasDiscount) return basePrice;
+
+    if (!basePrice) return 0;
+
+    if (discountType === "percent") {
+      const pct = Math.min(100, Math.max(0, discountValueNum));
+      return Math.max(0, Math.round(basePrice * (1 - pct / 100)));
+    }
+
+    // amount
+    const amt = Math.max(0, discountValueNum);
+    return Math.max(0, basePrice - amt);
+  }, [hasDiscount, discountType, discountValueNum, basePrice]);
+
+  const savings = useMemo(() => {
+    if (!hasDiscount) return 0;
+    return Math.max(0, basePrice - finalPrice);
+  }, [hasDiscount, basePrice, finalPrice]);
+
+  const editBasePrice = parseCOP(editPriceInput);
+
+  const editDiscountValueNum =
+    Number((editDiscountValueInput || "").replace(/[^\d]/g, "")) || 0;
+
+  const editFinalPrice = useMemo(() => {
+    if (!editHasDiscount) return editBasePrice;
+    if (!editBasePrice) return 0;
+
+    if (editDiscountType === "percent") {
+      const pct = Math.min(100, Math.max(0, editDiscountValueNum));
+      return Math.max(0, Math.round(editBasePrice * (1 - pct / 100)));
+    }
+
+    const amt = Math.max(0, editDiscountValueNum);
+    return Math.max(0, editBasePrice - amt);
+  }, [editHasDiscount, editDiscountType, editDiscountValueNum, editBasePrice]);
+
+  const editSavings = useMemo(() => {
+    if (!editHasDiscount) return 0;
+    return Math.max(0, editBasePrice - editFinalPrice);
+  }, [editHasDiscount, editBasePrice, editFinalPrice]);
+
 
   if (!storeId) return <div className="p-8 text-center">Buscando configuración de tienda...</div>;
+
 
   return (
     <div className="space-y-8">
       <div className="flex justify-between items-center">
         <h1 className="text-2xl font-bold">Productos</h1>
       </div>
+
+      {storeId ? <ImportProductsExcel storeId={storeId} /> : null}
 
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
         {/* CREATE */}
@@ -462,6 +597,86 @@ const ProductsView: React.FC = () => {
               required
             />
 
+            {/* Descuento */}
+            <div className="border rounded-lg p-3">
+              <div className="flex items-center justify-between">
+                <label className="text-sm text-gray-700 font-medium">
+                  Descuento
+                </label>
+
+                <div className="flex items-center gap-2">
+                  <input
+                    id="hasDiscount"
+                    type="checkbox"
+                    checked={hasDiscount}
+                    onChange={(e) => {
+                      const checked = e.target.checked;
+                      setHasDiscount(checked);
+                      if (!checked) {
+                        setDiscountValueInput("");
+                        setDiscountType("percent");
+                      }
+                    }}
+                  />
+                  <label htmlFor="hasDiscount" className="text-sm text-gray-600">
+                    Activar
+                  </label>
+                </div>
+              </div>
+
+              {hasDiscount ? (
+                <div className="mt-3 grid grid-cols-1 sm:grid-cols-3 gap-2">
+                  <select
+                    value={discountType}
+                    onChange={(e) => setDiscountType(e.target.value as any)}
+                    className="w-full p-2 border rounded"
+                  >
+                    <option value="percent">% Porcentaje</option>
+                    <option value="amount">$ Valor (COP)</option>
+                  </select>
+
+                  <input
+                    type="text"
+                    placeholder={discountType === "percent" ? "Ej: 10" : "Ej: 20000"}
+                    value={discountValueInput}
+                    onChange={(e) => setDiscountValueInput(e.target.value)}
+                    className="w-full p-2 border rounded sm:col-span-2"
+                  />
+
+                  <div className="sm:col-span-3 text-xs text-gray-500">
+                    {basePrice ? (
+                      <>
+                        <div>
+                          Precio original: <b>{formatCOP(basePrice)}</b>
+                        </div>
+                        <div>
+                          Precio final: <b className="text-indigo-700">{formatCOP(finalPrice)}</b>
+                          {savings > 0 ? (
+                            <> — Ahorro: <b>{formatCOP(savings)}</b></>
+                          ) : null}
+                        </div>
+                      </>
+                    ) : (
+                      <div>Escribe el precio para ver el cálculo del descuento.</div>
+                    )}
+                  </div>
+                </div>
+              ) : (
+                <div className="mt-2 text-xs text-gray-400">
+                  Si no activas descuento, se mostrará el precio normal.
+                </div>
+              )}
+            </div>
+
+
+            <input
+              type="text"
+              placeholder="Código / SKU (opcional)"
+              value={sku}
+              onChange={(e) => setSku(e.target.value)}
+              className="w-full p-2 border rounded"
+            />
+
             <select
               value={categoryId}
               onChange={(e) => setCategoryId(e.target.value)}
@@ -491,6 +706,7 @@ const ProductsView: React.FC = () => {
             <p className="text-[11px] text-gray-400">
               Máx {MAX_VIDEO_MB}MB por video.
             </p>
+
             {/* Videos múltiples */}
             <input
               type="file"
@@ -564,9 +780,10 @@ const ProductsView: React.FC = () => {
                             {/* imagen */}
                             {prod.images?.[0]?.url ? (
                               <img
-                                src={prod.images[0].url}
+                                src={cldImg(prod.images[0].url, { w: 80, h: 80, crop: "fill" })}
                                 alt={prod.name}
                                 className="w-10 h-10 rounded object-cover border shrink-0"
+                                loading="lazy"
                               />
                             ) : (
                               <div className="w-10 h-10 rounded bg-gray-100 border shrink-0" />
@@ -685,6 +902,86 @@ const ProductsView: React.FC = () => {
                     Preview: {formatCOP(parseCOP(editPriceInput))}
                   </div>
                 </div>
+                {/* SKU */}
+                <div>
+                  <label className="text-xs text-gray-500">Código / SKU</label>
+                  <input
+                    type="text"
+                    value={editSku}
+                    onChange={(e) => setEditSku(e.target.value)}
+                    className="w-full p-2 border rounded"
+                    placeholder="Opcional"
+                  />
+                </div>
+
+                {/* Descuento */}
+                <div className="border rounded-lg p-4 space-y-3">
+                  <div className="flex items-center justify-between">
+                    <label className="text-sm font-medium text-gray-700">
+                      Descuento
+                    </label>
+
+                    <div className="flex items-center gap-2">
+                      <input
+                        type="checkbox"
+                        checked={editHasDiscount}
+                        onChange={(e) => {
+                          const checked = e.target.checked;
+                          setEditHasDiscount(checked);
+                          if (!checked) {
+                            setEditDiscountValueInput("");
+                            setEditDiscountType("percent");
+                          }
+                        }}
+                      />
+                      <span className="text-sm text-gray-600">Activar</span>
+                    </div>
+                  </div>
+
+                  {editHasDiscount ? (
+                    <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
+                      <select
+                        value={editDiscountType}
+                        onChange={(e) => setEditDiscountType(e.target.value as any)}
+                        className="p-2 border rounded"
+                      >
+                        <option value="percent">% Porcentaje</option>
+                        <option value="amount">$ Valor (COP)</option>
+                      </select>
+
+                      <input
+                        type="text"
+                        value={editDiscountValueInput}
+                        onChange={(e) => setEditDiscountValueInput(e.target.value)}
+                        placeholder={editDiscountType === "percent" ? "Ej: 10" : "Ej: 20000"}
+                        className="p-2 border rounded sm:col-span-2"
+                      />
+
+                      <div className="sm:col-span-3 text-xs text-gray-500">
+                        {editBasePrice ? (
+                          <>
+                            <div>
+                              Precio original: <b>{formatCOP(editBasePrice)}</b>
+                            </div>
+                            <div>
+                              Precio final:{" "}
+                              <b className="text-indigo-700">{formatCOP(editFinalPrice)}</b>
+                              {editSavings > 0 && (
+                                <> — Ahorro: <b>{formatCOP(editSavings)}</b></>
+                              )}
+                            </div>
+                          </>
+                        ) : (
+                          <div>Escribe el precio para calcular el descuento.</div>
+                        )}
+                      </div>
+                    </div>
+                  ) : (
+                    <div className="text-xs text-gray-400">
+                      Sin descuento, se mostrará el precio normal.
+                    </div>
+                  )}
+                </div>
 
                 <div className="md:col-span-2">
                   <label className="text-xs text-gray-500">Descripción</label>
@@ -736,10 +1033,13 @@ const ProductsView: React.FC = () => {
                   {(editingProduct.images || []).map((img, idx) => (
                     <div key={img.path || img.url} className="relative">
                       <img
-                        src={img.url}
+                        src={cldImg(img.url, { w: 240, h: 240, crop: "fill" })}
                         alt="img"
-                        className="w-full h-24 object-cover rounded border"
+                        className="w-full h-auto object-cover rounded border"
+                        loading="lazy"
+                        decoding="async"
                       />
+
                       <button
                         type="button"
                         onClick={() => removeImageFromEdit(idx)}
@@ -823,6 +1123,43 @@ const ProductsView: React.FC = () => {
           </div>
         </div>
       )}
+
+
+      {uploading && (
+        <div className="fixed inset-0 z-[999] bg-black/40 flex items-center justify-center p-4">
+          <div className="bg-white w-full max-w-md rounded-2xl p-5 shadow-xl">
+            <div className="flex items-center gap-3">
+              <div className="animate-spin rounded-full h-6 w-6 border-t-2 border-b-2 border-indigo-600" />
+              <div>
+                <div className="font-bold">Subiendo archivos...</div>
+                <div className="text-xs text-gray-500">{uploadProgress.currentName}</div>
+              </div>
+            </div>
+
+            <div className="mt-4 text-xs text-gray-600">
+              {uploadProgress.done}/{uploadProgress.total}
+            </div>
+
+            <div className="mt-2 h-2 bg-gray-100 rounded-full overflow-hidden">
+              <div
+                className="h-full bg-indigo-600"
+                style={{
+                  width:
+                    uploadProgress.total > 0
+                      ? `${Math.round((uploadProgress.done / uploadProgress.total) * 100)}%`
+                      : "0%",
+                }}
+              />
+            </div>
+
+            <div className="mt-3 text-[11px] text-gray-400">
+              No cierres esta ventana mientras se suben los archivos.
+            </div>
+          </div>
+        </div>
+      )}
+
+
 
     </div>
   );

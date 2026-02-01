@@ -19,14 +19,6 @@ export const ImageCarousel: React.FC<{ images: string[]; alt: string }> = ({ ima
     return (
         <div className="relative">
             <div className="relative aspect-square bg-gray-100 rounded-2xl overflow-hidden">
-                {/* fondo relleno (borroso) */}
-                <img
-                    src={images[i]}
-                    alt=""
-                    className="absolute inset-0 h-full w-full object-cover blur-md scale-110 opacity-60"
-                    aria-hidden="true"
-                />
-
                 <img
                     src={images[i]}
                     alt={alt}
