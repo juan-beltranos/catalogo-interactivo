@@ -18,8 +18,21 @@ export const ImageCarousel: React.FC<{ images: string[]; alt: string }> = ({ ima
 
     return (
         <div className="relative">
-            <div className="aspect-square bg-gray-100 rounded-2xl overflow-hidden">
-                <img src={images[i]} alt={alt} className="h-full w-full object-cover" />
+            <div className="relative aspect-square bg-gray-100 rounded-2xl overflow-hidden">
+                {/* fondo relleno (borroso) */}
+                <img
+                    src={images[i]}
+                    alt=""
+                    className="absolute inset-0 h-full w-full object-cover blur-md scale-110 opacity-60"
+                    aria-hidden="true"
+                />
+
+                <img
+                    src={images[i]}
+                    alt={alt}
+                    className="relative z-10 h-full w-full object-contain"
+                    loading="lazy"
+                />
             </div>
 
             {images.length > 1 ? (
@@ -27,7 +40,7 @@ export const ImageCarousel: React.FC<{ images: string[]; alt: string }> = ({ ima
                     <button
                         type="button"
                         onClick={prev}
-                        className="absolute left-3 top-1/2 -translate-y-1/2 h-10 w-10 rounded-full bg-white/90 border shadow-sm flex items-center justify-center hover:bg-white"
+                        className="absolute left-3 top-1/2 -translate-y-1/2 z-20 h-10 w-10 rounded-full bg-white/90 border shadow-sm flex items-center justify-center hover:bg-white"
                         aria-label="Anterior"
                     >
                         <i className="fa-solid fa-chevron-left" />
@@ -36,13 +49,13 @@ export const ImageCarousel: React.FC<{ images: string[]; alt: string }> = ({ ima
                     <button
                         type="button"
                         onClick={next}
-                        className="absolute right-3 top-1/2 -translate-y-1/2 h-10 w-10 rounded-full bg-white/90 border shadow-sm flex items-center justify-center hover:bg-white"
+                        className="absolute right-3 top-1/2 -translate-y-1/2 z-20 h-10 w-10 rounded-full bg-white/90 border shadow-sm flex items-center justify-center hover:bg-white"
                         aria-label="Siguiente"
                     >
                         <i className="fa-solid fa-chevron-right" />
                     </button>
 
-                    <div className="absolute bottom-3 left-1/2 -translate-x-1/2 flex gap-1.5">
+                    <div className="absolute bottom-3 left-1/2 -translate-x-1/2 z-20 flex gap-1.5">
                         {images.map((_, idx) => (
                             <button
                                 key={idx}
@@ -57,5 +70,6 @@ export const ImageCarousel: React.FC<{ images: string[]; alt: string }> = ({ ima
                 </>
             ) : null}
         </div>
+
     );
 };

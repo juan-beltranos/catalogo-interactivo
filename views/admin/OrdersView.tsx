@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import {
   collection,
   query,
@@ -10,11 +10,17 @@ import {
   where,
   getDocs,
   limit,
+  QueryDocumentSnapshot,
+  DocumentData,
+  startAfter,
+  endBefore,
+  limitToLast,
 } from "firebase/firestore";
 import { db } from "../../lib/firebase";
 import { useAuth } from "../../context/AuthContext";
 import { Order, OrderItem, OrderStatus } from "@/types";
-import { formatCOP } from "@/helpers";
+import { formatCOP, formatDate, waTo } from "@/helpers";
+import Paginator from "@/components/catalog/Paginator";
 
 
 const statusMap: Record<OrderStatus, { label: string; color: string }> = {
@@ -25,21 +31,7 @@ const statusMap: Record<OrderStatus, { label: string; color: string }> = {
   cancelled: { label: "Cancelado", color: "bg-red-100 text-red-800" },
 };
 
-function formatDate(ts: any) {
-  try {
-    const d = ts?.toDate?.() ? ts.toDate() : null;
-    if (!d) return "-";
-    return `${d.toLocaleDateString()} ${d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}`;
-  } catch {
-    return "-";
-  }
-}
-
-function waTo(phoneDigits: string, message?: string) {
-  const clean = (phoneDigits || "").replace(/[^\d]/g, "");
-  const text = encodeURIComponent(message || "");
-  return `https://wa.me/${clean}${message ? `?text=${text}` : ""}`;
-}
+const PAGE_SIZE = 10;
 
 const OrdersView: React.FC = () => {
   const { user } = useAuth();
@@ -48,8 +40,22 @@ const OrdersView: React.FC = () => {
   const [orders, setOrders] = useState<Order[]>([]);
   const [loading, setLoading] = useState(true);
 
+
+  const [page, setPage] = useState(1);
+  const [hasNext, setHasNext] = useState(false);
+  const [loadingPage, setLoadingPage] = useState(false);
+
+  const [pageFirstDoc, setPageFirstDoc] =
+    useState<QueryDocumentSnapshot<DocumentData> | null>(null);
+  const [pageLastDoc, setPageLastDoc] =
+    useState<QueryDocumentSnapshot<DocumentData> | null>(null);
+
+  const [history, setHistory] = useState<QueryDocumentSnapshot<DocumentData>[]>([]);
+
   const [selectedOrder, setSelectedOrder] = useState<Order | null>(null);
   const [filterStatus, setFilterStatus] = useState<OrderStatus | "all">("all");
+
+  const activeRequestId = useRef(0);
 
   // 1) Obtener storeId por ownerUid (igual que ProductsView)
   useEffect(() => {
@@ -73,69 +79,19 @@ const OrdersView: React.FC = () => {
     fetchStore();
   }, [user]);
 
-  // 2) Escuchar pedidos de la tienda
+  // 2) Cargar pedidos paginados 
   useEffect(() => {
     if (!storeId) return;
 
     setLoading(true);
-    const qOrders = query(collection(db, "stores", storeId, "orders"), orderBy("createdAt", "desc"));
+    setPage(1);
+    setHistory([]);
+    setPageFirstDoc(null);
+    setPageLastDoc(null);
+    setHasNext(false);
 
-    const unsubscribe = onSnapshot(
-      qOrders,
-      (snapshot) => {
-        const data = snapshot.docs.map((d) => {
-          const x = d.data() as any;
-
-          // Compat: si algún pedido viejo guarda customerName, etc., lo mapeamos
-          const customer = x.customer ?? {
-            name: x.customerName ?? "",
-            phone: x.customerPhone ?? "",
-            address: x.customerAddress ?? "",
-          };
-
-          // Compat items viejo vs nuevo
-          const items: OrderItem[] = (x.items ?? []).map((it: any) => ({
-            productId: it.productId ?? it.id ?? "",
-            productName: it.productName ?? it.name ?? "",
-            variantId: it.variantId ?? null,
-            variantTitle: it.variantTitle ?? null,
-            unitPrice: Number(it.unitPrice ?? it.price ?? 0),
-            qty: Number(it.qty ?? it.quantity ?? 1),
-            subtotal: Number(it.subtotal ?? (Number(it.unitPrice ?? it.price ?? 0) * Number(it.qty ?? it.quantity ?? 1))),
-          }));
-
-          const o: Order = {
-            id: d.id,
-            status: (x.status as OrderStatus) ?? "new",
-            channel: x.channel ?? "whatsapp",
-            customer,
-            notes: x.notes ?? "",
-            items,
-            total: Number(x.total ?? 0),
-            createdAt: x.createdAt,
-            updatedAt: x.updatedAt,
-          };
-
-          return o;
-        }) as Order[];
-
-        setOrders(data);
-        setLoading(false);
-      },
-      (err) => {
-        console.error(err);
-        setLoading(false);
-        alert("Error al cargar pedidos");
-      }
-    );
-
-    return () => unsubscribe();
-  }, [storeId]);
-
-  const filteredOrders = useMemo(() => {
-    if (filterStatus === "all") return orders;
-    return orders.filter((o) => o.status === filterStatus);
-  }, [orders, filterStatus]);
+    loadOrdersPage("first", filterStatus);
+  }, [storeId, filterStatus]);
 
   const counters = useMemo(() => {
     const c: Record<OrderStatus, number> = {
@@ -174,6 +130,124 @@ const OrdersView: React.FC = () => {
     }
   };
 
+  const mapDocToOrder = (d: QueryDocumentSnapshot<DocumentData>) => {
+    const x = d.data() as any;
+
+    const customer = x.customer ?? {
+      name: x.customerName ?? "",
+      phone: x.customerPhone ?? "",
+      address: x.customerAddress ?? "",
+    };
+
+    const items: OrderItem[] = (x.items ?? []).map((it: any) => ({
+      productId: it.productId ?? it.id ?? "",
+      productName: it.productName ?? it.name ?? "",
+      variantId: it.variantId ?? null,
+      variantTitle: it.variantTitle ?? null,
+      unitPrice: Number(it.unitPrice ?? it.price ?? 0),
+      qty: Number(it.qty ?? it.quantity ?? 1),
+      subtotal: Number(
+        it.subtotal ??
+        (Number(it.unitPrice ?? it.price ?? 0) *
+          Number(it.qty ?? it.quantity ?? 1))
+      ),
+    }));
+
+    const o: Order = {
+      id: d.id,
+      status: (x.status as OrderStatus) ?? "new",
+      channel: x.channel ?? "whatsapp",
+      customer,
+      notes: x.notes ?? "",
+      items,
+      total: Number(x.total ?? 0),
+      createdAt: x.createdAt,
+      updatedAt: x.updatedAt,
+    };
+
+    return o;
+  };
+
+  const loadOrdersPage = async (
+    mode: "first" | "next" | "prev",
+    status: OrderStatus | "all"
+  ) => {
+    if (!storeId) return;
+
+    activeRequestId.current += 1;
+    const reqId = activeRequestId.current;
+
+    setLoadingPage(true);
+
+    try {
+      const baseRef = collection(db, "stores", storeId, "orders");
+
+      let qBase =
+        status === "all"
+          ? query(baseRef, orderBy("createdAt", "desc"))
+          : query(baseRef, where("status", "==", status), orderBy("createdAt", "desc"));
+
+      if (mode === "next") {
+        if (!pageLastDoc) {
+          return;
+        }
+        qBase = query(qBase, startAfter(pageLastDoc));
+      }
+
+      if (mode === "prev") {
+        if (!pageFirstDoc) {
+          return;
+        }
+        qBase = query(qBase, endBefore(pageFirstDoc), limitToLast(PAGE_SIZE + 1));
+      } else {
+        qBase = query(qBase, limit(PAGE_SIZE + 1));
+      }
+
+      const snap = await getDocs(qBase);
+
+      if (reqId !== activeRequestId.current) return;
+
+      const docs = snap.docs;
+      const nextExists = docs.length > PAGE_SIZE;
+      const pageDocs = nextExists ? docs.slice(0, PAGE_SIZE) : docs;
+
+      setOrders(pageDocs.map(mapDocToOrder));
+      setHasNext(nextExists);
+      setPageFirstDoc(pageDocs[0] ?? null);
+      setPageLastDoc(pageDocs[pageDocs.length - 1] ?? null);
+    } catch (err) {
+      console.error("Error loading orders page:", err);
+    } finally {
+      if (reqId === activeRequestId.current) {
+        setLoadingPage(false);
+        setLoading(false);
+      }
+    }
+  };
+
+  const loadFirstOrdersPage = async () => {
+    setPage(1);
+    setHistory([]);
+    await loadOrdersPage("first", filterStatus);
+
+  };
+
+  const goNextOrders = async () => {
+    if (!hasNext || loadingPage) return;
+    if (pageFirstDoc) setHistory((h) => [...h, pageFirstDoc]);
+    setPage((p) => p + 1);
+    await loadOrdersPage("next", filterStatus);
+
+  };
+
+  const goPrevOrders = async () => {
+    if (history.length === 0 || loadingPage) return;
+    setHistory((h) => h.slice(0, -1));
+    setPage((p) => Math.max(1, p - 1));
+    await loadOrdersPage("prev", filterStatus);
+
+  };
+
   if (!storeId && loading) {
     return <div className="p-8 text-center text-gray-500">Cargando tienda...</div>;
   }
@@ -189,8 +263,9 @@ const OrdersView: React.FC = () => {
         <div className="flex items-center gap-2">
           <select
             value={filterStatus}
+            disabled={loadingPage || loading}
             onChange={(e) => setFilterStatus(e.target.value as any)}
-            className="border rounded-lg px-3 py-2 text-sm"
+            className="border rounded-lg px-3 py-2 text-sm disabled:opacity-60"
           >
             <option value="all">Todos ({orders.length})</option>
             <option value="new">Nuevos ({counters.new})</option>
@@ -221,7 +296,7 @@ const OrdersView: React.FC = () => {
               </thead>
 
               <tbody className="divide-y divide-gray-100">
-                {filteredOrders.map((order) => (
+                {orders.map((order) => (
                   <tr key={order.id} className="hover:bg-gray-50 transition-colors">
                     <td className="px-6 py-4">
                       <div className="text-xs font-mono text-indigo-600 font-bold mb-1">
@@ -289,7 +364,7 @@ const OrdersView: React.FC = () => {
                   </tr>
                 ))}
 
-                {filteredOrders.length === 0 && (
+                {orders.length === 0 && (
                   <tr>
                     <td colSpan={5} className="px-6 py-12 text-center text-gray-500 italic">
                       No hay pedidos para este filtro.
@@ -298,6 +373,14 @@ const OrdersView: React.FC = () => {
                 )}
               </tbody>
             </table>
+            <Paginator
+              page={page}
+              hasNext={hasNext}
+              hasPrev={history.length > 0}
+              loading={loadingPage}
+              onNext={goNextOrders}
+              onPrev={goPrevOrders}
+            />
           </div>
         )}
       </div>

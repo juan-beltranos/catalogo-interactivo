@@ -16,7 +16,7 @@ import {
 import { db } from "../../lib/firebase";
 import { Product, Store } from "@/interfaces";
 import { CartItem, Category, Variant } from "@/types";
-import { buildWaLink, calcTotal, cartStorageKey, formatCOP, getProductDisplayPrice, getProductMainImage } from "@/helpers";
+import { buildWaLink, calcTotal, cartStorageKey, formatCOP, getProductDisplayPrice, getProductMainImage, norm } from "@/helpers";
 import { ImageCarousel } from "@/components/catalog/ImageCarousel";
 
 const CatalogView: React.FC = () => {
@@ -39,6 +39,9 @@ const CatalogView: React.FC = () => {
   const [customerNotes, setCustomerNotes] = useState("");
   const [activeCategoryId, setActiveCategoryId] = useState<string>("all");
 
+  const [search, setSearch] = useState("");
+
+
   // Variant picker modal
   const [productModal, setProductModal] = useState<{
     open: boolean;
@@ -48,10 +51,40 @@ const CatalogView: React.FC = () => {
 
   const total = useMemo(() => calcTotal(cart), [cart]);
 
+  const categoryNameById = useMemo(() => {
+    const map = new Map<string, string>();
+    categories.forEach((c) => map.set(c.id, c.name));
+    return map;
+  }, [categories]);
+
   const filteredProducts = useMemo(() => {
-    if (activeCategoryId === "all") return products;
-    return products.filter((p) => p.categoryId === activeCategoryId);
-  }, [products, activeCategoryId]);
+    const q = norm(search);
+    const byCategory =
+      activeCategoryId === "all"
+        ? products
+        : products.filter((p) => p.categoryId === activeCategoryId);
+
+    if (!q) return byCategory;
+
+    const base = byCategory;
+
+    return base.filter((p) => {
+      const catName = categoryNameById.get(p.categoryId) || "";
+
+      const variantsText = (p.variants || [])
+        .map((v: any) => `${v.title ?? ""} ${v.sku ?? ""}`)
+        .join(" ");
+
+      const priceText = `${p.price ?? ""} ${(p.variants || []).map((v: any) => v.price ?? "").join(" ")}`;
+
+      const haystack = norm(
+        `${p.name} ${p.description} ${catName} ${variantsText} ${priceText}`
+      );
+
+      return haystack.includes(q);
+    });
+  }, [products, activeCategoryId, search, categoryNameById]);
+
 
   const categoriesWithProducts = useMemo(() => {
     const ids = new Set(products.map((p) => p.categoryId));
@@ -398,6 +431,30 @@ const CatalogView: React.FC = () => {
       {/* Content */}
       <main className="max-w-6xl mx-auto px-4 py-6 space-y-6">
         {/* Título de la vista */}
+
+        <div className="flex items-center gap-2">
+          <div className="relative flex-1">
+            <i className="fa-solid fa-magnifying-glass absolute left-3 top-1/2 -translate-y-1/2 text-gray-400 text-sm" />
+            <input
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+              placeholder="Buscar por nombre, descripción, categoría, variante..."
+              className="w-full pl-9 pr-10 py-2.5 rounded-2xl border border-gray-200 bg-white
+                 focus:outline-none focus:ring-2 focus:ring-indigo-200"
+            />
+            {search.trim() ? (
+              <button
+                type="button"
+                onClick={() => setSearch("")}
+                className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-700"
+                aria-label="Limpiar búsqueda"
+              >
+                <i className="fa-solid fa-xmark" />
+              </button>
+            ) : null}
+          </div>
+        </div>
+
         <div className="flex items-center justify-between">
           <div className="text-sm text-gray-500">
             {activeCategoryId === "all"
@@ -436,24 +493,34 @@ const CatalogView: React.FC = () => {
                 >
                   <div className="relative aspect-square bg-gray-100 overflow-hidden">
                     {img ? (
-                      <img
-                        src={img}
-                        alt={prod.name}
-                        className="h-full w-full object-cover group-hover:scale-[1.03] transition"
-                        loading="lazy"
-                      />
+                      <>
+                        {/* fondo relleno (borroso) */}
+                        <img
+                          src={img}
+                          alt=""
+                          className="absolute inset-0 h-full w-full object-cover blur-md scale-110 opacity-60"
+                          aria-hidden="true"
+                        />
+                        <img
+                          src={img}
+                          alt={prod.name}
+                          className="relative z-10 h-full w-full object-contain"
+                          loading="lazy"
+                        />
+                      </>
                     ) : (
                       <div className="h-full w-full flex items-center justify-center text-gray-400">
                         <i className="fa-regular fa-image text-2xl" />
                       </div>
                     )}
 
-                    <div className="absolute left-3 bottom-3">
+                    <div className="absolute left-3 bottom-3 z-20">
                       <span className="inline-flex items-center rounded-full bg-white/90 backdrop-blur px-3 py-1 text-xs font-extrabold text-indigo-700 border border-indigo-50 shadow-sm">
                         {priceInfo.label}
                       </span>
                     </div>
                   </div>
+
 
                   <div className="p-3 sm:p-4 flex-1 flex flex-col">
                     <h3 className="text-sm sm:text-[15px] font-extrabold text-gray-900 line-clamp-1">
@@ -487,6 +554,7 @@ const CatalogView: React.FC = () => {
             })}
           </div>
         )}
+
       </main>
 
       {/* Bottom CTA */}
@@ -667,10 +735,29 @@ const CatalogView: React.FC = () => {
                       key={`${it.productId}:${it.variantId || "base"}`}
                       className="flex gap-3 border border-gray-100 rounded-2xl p-3 shadow-sm"
                     >
-                      <div className="w-16 h-16 rounded-2xl bg-gray-100 overflow-hidden border">
+                      <div className="w-16 h-16 rounded-2xl bg-gray-100 overflow-hidden border relative">
                         {it.imageUrl ? (
-                          <img src={it.imageUrl} className="w-full h-full object-cover" />
-                        ) : null}
+                          <>
+                            {/* fondo borroso */}
+                            <img
+                              src={it.imageUrl}
+                              alt=""
+                              className="absolute inset-0 w-full h-full object-cover blur-sm scale-110 opacity-60"
+                              aria-hidden="true"
+                            />
+
+                            <img
+                              src={it.imageUrl}
+                              alt={it.productName}
+                              className="relative z-10 w-full h-full object-contain"
+                              loading="lazy"
+                            />
+                          </>
+                        ) : (
+                          <div className="w-full h-full flex items-center justify-center text-gray-400">
+                            <i className="fa-regular fa-image text-sm" />
+                          </div>
+                        )}
                       </div>
 
                       <div className="flex-1 min-w-0">

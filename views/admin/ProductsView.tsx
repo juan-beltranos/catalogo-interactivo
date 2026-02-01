@@ -11,6 +11,12 @@ import {
   serverTimestamp,
   where,
   getDocs,
+  QueryDocumentSnapshot,
+  DocumentData,
+  startAfter,
+  endBefore,
+  limit,
+  limitToLast,
 } from "firebase/firestore";
 import { ref, uploadBytes, getDownloadURL, deleteObject } from "firebase/storage";
 import { db, storage } from "../../lib/firebase";
@@ -21,6 +27,9 @@ import { formatCOP, parseCOP } from "@/helpers";
 import VariantsEditor from "@/components/admin/VariantsEditor";
 import { compressImage } from "@/helpers/imageCompression";
 import { MAX_VIDEO_MB, validateVideoFile } from "@/helpers/videoValidation";
+import Paginator from "@/components/catalog/Paginator";
+
+const PAGE_SIZE = 20;
 
 const ProductsView: React.FC = () => {
   const { user } = useAuth();
@@ -29,6 +38,17 @@ const ProductsView: React.FC = () => {
   const [products, setProducts] = useState<Product[]>([]);
   const [categories, setCategories] = useState<{ id: string; name: string }[]>([]);
   const [loading, setLoading] = useState(true);
+
+  const [page, setPage] = useState(1);
+  const [hasNext, setHasNext] = useState(false);
+  const [loadingPage, setLoadingPage] = useState(false);
+
+  const [pageFirstDoc, setPageFirstDoc] =
+    useState<QueryDocumentSnapshot<DocumentData> | null>(null);
+  const [pageLastDoc, setPageLastDoc] =
+    useState<QueryDocumentSnapshot<DocumentData> | null>(null);
+
+  const [history, setHistory] = useState<QueryDocumentSnapshot<DocumentData>[]>([]);
 
   // Create form
   const [name, setName] = useState("");
@@ -84,33 +104,14 @@ const ProductsView: React.FC = () => {
       setCategories(snap.docs.map((d) => ({ id: d.id, name: d.data().name })));
     });
 
-    const qProds = query(prodsRef, orderBy("createdAt", "desc"));
-    const unsubProds = onSnapshot(qProds, (snap) => {
-      const list = snap.docs.map((d) => {
-        const data = d.data() as any;
-        return {
-          id: d.id,
-          name: data.name ?? "",
-          description: data.description ?? "",
-          price: Number(data.price ?? 0),
-          categoryId: data.categoryId ?? "",
-          images: (data.images ?? []) as ImageItem[],
-          videos: (data.videos ?? []) as VideoItem[], 
-          options: (data.options ?? []) as ProductOption[],
-          variants: (data.variants ?? []) as Variant[],
-        } satisfies Product;
-
-      });
-
-      setProducts(list);
-      setLoading(false);
-    });
+    setLoading(true);
+    loadFirstPage();
 
     return () => {
       unsubCats();
-      unsubProds();
     };
   }, [storeId, catsRef, prodsRef]);
+
 
   // --- Images upload helper ---
   const uploadImages = async (files: File[]): Promise<ImageItem[]> => {
@@ -215,8 +216,6 @@ const ProductsView: React.FC = () => {
     }
   };
 
-
-
   // --- DELETE product (incluye borrar imágenes en Storage) ---
   const handleDeleteProduct = async (prod: Product) => {
     if (!storeId) return;
@@ -256,7 +255,6 @@ const ProductsView: React.FC = () => {
     setEditPriceInput(String(p.price));
     setUseVariants((p.variants?.length ?? 0) > 0);
   };
-
 
   const handleUpdateProduct = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -351,6 +349,77 @@ const ProductsView: React.FC = () => {
 
     setEditingProduct({ ...(editingProduct as any), videos: next });
   };
+
+  const mapDocToProduct = (d: QueryDocumentSnapshot<DocumentData>) => {
+    const data = d.data() as any;
+    return {
+      id: d.id,
+      name: data.name ?? "",
+      description: data.description ?? "",
+      price: Number(data.price ?? 0),
+      categoryId: data.categoryId ?? "",
+      images: (data.images ?? []) as ImageItem[],
+      videos: (data.videos ?? []) as VideoItem[],
+      options: (data.options ?? []) as ProductOption[],
+      variants: (data.variants ?? []) as Variant[],
+    } satisfies Product;
+  };
+
+  const loadPage = async (mode: "first" | "next" | "prev") => {
+    if (!prodsRef) return;
+
+    setLoadingPage(true);
+    try {
+      let qBase = query(prodsRef, orderBy("createdAt", "desc"));
+
+      if (mode === "next" && pageLastDoc) {
+        qBase = query(qBase, startAfter(pageLastDoc));
+      }
+
+      if (mode === "prev" && pageFirstDoc) {
+        // vuelve hacia atrás: trae los últimos 31 antes del firstDoc actual
+        qBase = query(qBase, endBefore(pageFirstDoc), limitToLast(PAGE_SIZE + 1));
+      } else {
+        qBase = query(qBase, limit(PAGE_SIZE + 1));
+      }
+
+      const snap = await getDocs(qBase);
+      const docs = snap.docs;
+
+      const nextExists = docs.length > PAGE_SIZE;
+      const pageDocs = nextExists ? docs.slice(0, PAGE_SIZE) : docs;
+
+      setProducts(pageDocs.map(mapDocToProduct));
+      setHasNext(nextExists);
+
+      setPageFirstDoc(pageDocs[0] ?? null);
+      setPageLastDoc(pageDocs[pageDocs.length - 1] ?? null);
+    } finally {
+      setLoadingPage(false);
+      setLoading(false);
+    }
+  };
+
+  const loadFirstPage = async () => {
+    setPage(1);
+    setHistory([]);
+    await loadPage("first");
+  };
+
+  const goNext = async () => {
+    if (!hasNext || loadingPage) return;
+    if (pageFirstDoc) setHistory((h) => [...h, pageFirstDoc]);
+    setPage((p) => p + 1);
+    await loadPage("next");
+  };
+
+  const goPrev = async () => {
+    if (history.length === 0 || loadingPage) return;
+    setHistory((h) => h.slice(0, -1));
+    setPage((p) => Math.max(1, p - 1));
+    await loadPage("prev");
+  };
+
 
   if (!storeId) return <div className="p-8 text-center">Buscando configuración de tienda...</div>;
 
@@ -563,7 +632,16 @@ const ProductsView: React.FC = () => {
                   ) : null}
                 </tbody>
               </table>
+              <Paginator
+                page={page}
+                hasNext={hasNext}
+                hasPrev={history.length > 0}
+                loading={loadingPage}
+                onNext={goNext}
+                onPrev={goPrev}
+              />
             </div>
+
           )}
         </div>
 

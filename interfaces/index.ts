@@ -41,3 +41,13 @@ export interface Category {
   name: string;
   order: number;
 }
+
+export interface PaginatorProps {
+    page: number;
+    hasNext: boolean;
+    hasPrev: boolean;
+    loading?: boolean;
+    onNext: () => void;
+    onPrev: () => void;
+    className?: string;
+}

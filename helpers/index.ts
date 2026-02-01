@@ -98,3 +98,10 @@ export function startOfToday() {
 
 export const uid = () => Math.random().toString(36).slice(2, 10);
 export const normalizePhone = (p: string) => (p || "").replace(/[^\d]/g, "");
+
+export const norm = (s: any) =>
+    String(s ?? "")
+        .toLowerCase()
+        .normalize("NFD")
+        .replace(/[\u0300-\u036f]/g, "")
+        .trim();
