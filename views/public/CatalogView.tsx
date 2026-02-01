@@ -24,6 +24,7 @@ import { ImageCarousel } from "@/components/catalog/ImageCarousel";
 import { cldImg } from "@/helpers/cloudinaryUpload";
 
 const PAGE_SIZE = 20;
+const ALL_BATCH = 500;
 
 
 const CatalogView: React.FC = () => {
@@ -55,6 +56,13 @@ const CatalogView: React.FC = () => {
   const [lastDoc, setLastDoc] =
     useState<QueryDocumentSnapshot<DocumentData> | null>(null);
 
+  const [allProducts, setAllProducts] = useState<Product[]>([]);
+  const [allLoaded, setAllLoaded] = useState(false);
+  const [searchLoading, setSearchLoading] = useState(false);
+
+  const isSearching = search.trim().length > 0;
+
+
   // Variant picker modal
   const [productModal, setProductModal] = useState<{
     open: boolean;
@@ -72,16 +80,17 @@ const CatalogView: React.FC = () => {
 
   const filteredProducts = useMemo(() => {
     const q = norm(search);
-    const byCategory =
-      activeCategoryId === "all"
-        ? products
-        : products.filter((p) => p.categoryId === activeCategoryId);
 
-    if (!q) return byCategory;
+    const source = q ? allProducts : products;
 
-    const base = byCategory;
+    if (!q) {
 
-    return base.filter((p) => {
+      return activeCategoryId === "all"
+        ? source
+        : source.filter((p) => p.categoryId === activeCategoryId);
+    }
+
+    return source.filter((p) => {
       const catName = categoryNameById.get(p.categoryId) || "";
 
       const variantsText = (p.variants || [])
@@ -91,12 +100,13 @@ const CatalogView: React.FC = () => {
       const priceText = `${p.price ?? ""} ${(p.variants || []).map((v: any) => v.price ?? "").join(" ")}`;
 
       const haystack = norm(
-        `${p.name} ${p.sku ?? ""} ${p.description} ${catName} ${variantsText} ${priceText}`
+        `${p.name} ${p.sku ?? ""} ${p.description ?? ""} ${catName} ${variantsText} ${priceText}`
       );
 
       return haystack.includes(q);
     });
-  }, [products, activeCategoryId, search, categoryNameById]);
+  }, [search, allProducts, products, activeCategoryId, categoryNameById]);
+
 
   useEffect(() => {
     if (!categories.length) return;
@@ -160,6 +170,14 @@ const CatalogView: React.FC = () => {
 
     return () => unsubscribeCats();
   }, [store]);
+
+  useEffect(() => {
+    if (!store) return;
+    if (!isSearching) return;
+
+    fetchAllProductsOnce();
+  }, [store?.id, isSearching]);
+
 
   const addToCart = (prod: Product, variant?: Variant) => {
     const unitPrice = variant ? Number(variant.price || 0) : Number(prod.price || 0);
@@ -476,6 +494,44 @@ const CatalogView: React.FC = () => {
     fetchFirstPage();
   }, [store?.id, activeCategoryId]);
 
+
+  const fetchAllProductsOnce = async () => {
+    if (!store || allLoaded || searchLoading) return;
+
+    setSearchLoading(true);
+    setQueryError(null);
+
+    try {
+      const baseRef = collection(db, "stores", store.id, "products");
+
+      let acc: Product[] = [];
+      let cursor: QueryDocumentSnapshot<DocumentData> | null = null;
+
+      while (true) {
+        const constraints: any[] = [orderBy("createdAt", "desc"), limit(ALL_BATCH)];
+        if (cursor) constraints.splice(1, 0, startAfter(cursor)); // after orderBy
+
+        const qAll = query(baseRef, ...constraints);
+        const snap = await getDocs(qAll);
+
+        const docs = snap.docs;
+        acc = acc.concat(docs.map((d) => ({ id: d.id, ...(d.data() as any) })) as Product[]);
+
+        if (docs.length < ALL_BATCH) break;
+        cursor = docs[docs.length - 1];
+      }
+
+      setAllProducts(acc);
+      setAllLoaded(true);
+    } catch (e: any) {
+      console.error("fetchAllProductsOnce error:", e);
+      setQueryError("Error cargando productos para búsqueda. Revisa la consola.");
+    } finally {
+      setSearchLoading(false);
+    }
+  };
+
+
   if (loading) return <div className="h-screen flex items-center justify-center">Cargando catálogo...</div>;
   if (!store) return <div className="h-screen flex items-center justify-center">Tienda no encontrada.</div>;
 
@@ -598,6 +654,12 @@ const CatalogView: React.FC = () => {
             ) : null}
           </div>
         </div>
+        {isSearching && !allLoaded ? (
+          <div className="text-sm text-gray-500">
+            {searchLoading ? "Preparando búsqueda en todos los productos..." : "Cargando productos para búsqueda..."}
+          </div>
+        ) : null}
+
 
         <div className="flex items-center justify-between">
           <div className="text-sm text-gray-500">
@@ -746,7 +808,7 @@ const CatalogView: React.FC = () => {
           </div>
         )}
 
-        {hasMore ? (
+        {!isSearching && hasMore ? (
           <div className="flex justify-center">
             <button
               onClick={fetchMorePage}
@@ -757,6 +819,7 @@ const CatalogView: React.FC = () => {
             </button>
           </div>
         ) : null}
+
 
       </main>
 
