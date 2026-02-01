@@ -57,7 +57,7 @@ export default function ImportProductsExcel({ storeId }: { storeId: string }) {
                 const sku = String(pick(r, ["CODIGO", "Código", "codigo", "SKU", "sku"]) ?? "").trim();
                 const name = String(pick(r, ["NOMBRE", "Nombre", "nombre", "NAME", "name"]) ?? "").trim();
                 const categoryName = String(pick(r, ["CATEGORIA", "Categoría", "categoria", "CATEGORY", "category"]) ?? "").trim();
-                const priceRaw = pick(r, ["PRECIO ANTES DE IVA", "PRECIO", "Precio", "precio", "PRICE", "price"]);
+                const priceRaw = pick(r, ["PRECIO", "Precio", "precio", "PRICE", "price", "PRECIO FINAL"]);
                 const price = parseMoneyToNumber(priceRaw);
 
                 return { sku, name, categoryName, price };
@@ -174,7 +174,7 @@ export default function ImportProductsExcel({ storeId }: { storeId: string }) {
                 </div>
             ) : (
                 <div className="text-xs text-gray-400">
-                  {''}
+                    {''}
                 </div>
             )}
 
