@@ -32,7 +32,7 @@ import { ref, uploadBytes, getDownloadURL, deleteObject } from "firebase/storage
 import { storage } from "../../lib/firebase";
 import ImportProductsExcel from "@/components/catalog/ImportProductsExcel";
 
-const PAGE_SIZE = 20;
+const PAGE_SIZE = 10;
 
 const ProductsView: React.FC = () => {
   const { user } = useAuth();
@@ -65,11 +65,9 @@ const ProductsView: React.FC = () => {
   const [discountType, setDiscountType] = useState<"percent" | "amount">("percent");
   const [discountValueInput, setDiscountValueInput] = useState(""); // "10" o "20000"
 
-
   // Variants (create)
   const [useVariants, setUseVariants] = useState(false);
   const [createVariants, setCreateVariants] = useState<Variant[]>([]);
-
 
   // Edit modal
   const [editSku, setEditSku] = useState("");
@@ -91,6 +89,15 @@ const ProductsView: React.FC = () => {
     currentName: "",
   });
 
+  // SEARCH (cache local)
+  const [search, setSearch] = useState("");
+  const [debouncedSearch, setDebouncedSearch] = useState("");
+  const [searching, setSearching] = useState(false);
+  const [searchResults, setSearchResults] = useState<Product[]>([]);
+
+  // cache de todos los productos
+  const [allProducts, setAllProducts] = useState<Product[]>([]);
+  const [allLoaded, setAllLoaded] = useState(false);
 
   // 1) storeId del usuario actual
   useEffect(() => {
@@ -135,6 +142,80 @@ const ProductsView: React.FC = () => {
     };
   }, [storeId, catsRef, prodsRef]);
 
+  useEffect(() => {
+    const t = setTimeout(() => setDebouncedSearch(search.trim().toLowerCase()), 350);
+    return () => clearTimeout(t);
+  }, [search]);
+
+
+  const loadAllProductsOnce = async () => {
+    if (!prodsRef) return;
+    if (allLoaded) return;
+
+    setSearching(true);
+    try {
+      // Trae todo ordenado para que se vea “bonito” al filtrar
+      const snap = await getDocs(query(prodsRef, orderBy("createdAt", "desc")));
+      const all = snap.docs.map(mapDocToProduct);
+      setAllProducts(all);
+      setAllLoaded(true);
+    } catch (e) {
+      console.error(e);
+      alert("Error cargando todos los productos para búsqueda.");
+    } finally {
+      setSearching(false);
+    }
+  };
+
+  const normalize = (s: string) =>
+    (s || "")
+      .toLowerCase()
+      .normalize("NFD")
+      .replace(/[\u0300-\u036f]/g, "") // quita acentos
+      .trim();
+
+  const filterLocal = (termRaw: string) => {
+    const term = normalize(termRaw);
+    if (!term) {
+      setSearchResults([]);
+      return;
+    }
+
+    const parts = term.split(/\s+/).filter(Boolean);
+
+    const filtered = allProducts.filter((p) => {
+      const hay = normalize(
+        `${p.name ?? ""} ${p.sku ?? ""} ${p.description ?? ""}`
+      );
+
+      // AND: todas las palabras deben aparecer
+      return parts.every((w) => hay.includes(w));
+    });
+
+    setSearchResults(filtered);
+  };
+
+  useEffect(() => {
+    if (!storeId || !prodsRef) return;
+
+    const run = async () => {
+      if (!debouncedSearch) {
+        setSearchResults([]);
+        return;
+      }
+
+      // lazy load: solo la primera vez que el usuario busca
+      if (!allLoaded) {
+        await loadAllProductsOnce();
+      }
+
+      // filtra con lo que haya en memoria
+      filterLocal(debouncedSearch);
+    };
+
+    run();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [debouncedSearch, storeId, prodsRef, allLoaded]);
 
   // --- Images upload helper ---
   const uploadImages = async (files: File[]): Promise<ImageItem[]> => {
@@ -259,6 +340,8 @@ const ProductsView: React.FC = () => {
       });
 
       await loadFirstPage();
+      if (allLoaded) await reloadAllProducts();
+
       resetCreateForm();
       setCreateVariants([]);
     } catch (err) {
@@ -266,6 +349,18 @@ const ProductsView: React.FC = () => {
       alert("Error al guardar producto");
     } finally {
       setIsSubmitting(false);
+    }
+  };
+
+  const reloadAllProducts = async () => {
+    if (!prodsRef) return;
+    setSearching(true);
+    try {
+      const snap = await getDocs(query(prodsRef, orderBy("createdAt", "desc")));
+      setAllProducts(snap.docs.map(mapDocToProduct));
+      setAllLoaded(true);
+    } finally {
+      setSearching(false);
     }
   };
 
@@ -287,6 +382,7 @@ const ProductsView: React.FC = () => {
 
       await deleteDoc(doc(db, "stores", storeId, "products", prod.id));
       await loadFirstPage();
+      if (allLoaded) await reloadAllProducts();
     } catch (err) {
       console.error(err);
       alert("Error al eliminar producto");
@@ -352,6 +448,7 @@ const ProductsView: React.FC = () => {
       });
 
       await loadFirstPage();
+      if (allLoaded) await reloadAllProducts();
       setEditingProduct(null);
     } catch (err) {
       console.error(err);
@@ -437,8 +534,8 @@ const ProductsView: React.FC = () => {
     return {
       id: d.id,
       name: data.name ?? "",
-      sku: data.sku ?? null,             
-      discount: data.discount ?? null, 
+      sku: data.sku ?? null,
+      discount: data.discount ?? null,
       description: data.description ?? "",
       price: Number(data.price ?? 0),
       categoryId: data.categoryId ?? "",
@@ -448,7 +545,6 @@ const ProductsView: React.FC = () => {
       variants: (data.variants ?? []) as Variant[],
     } satisfies Product;
   };
-
 
   const loadPage = async (mode: "first" | "next" | "prev") => {
     if (!prodsRef) return;
@@ -555,6 +651,7 @@ const ProductsView: React.FC = () => {
 
   if (!storeId) return <div className="p-8 text-center">Buscando configuración de tienda...</div>;
 
+  const listToRender = search ? searchResults : products;
 
   return (
     <div className="space-y-8">
@@ -752,6 +849,36 @@ const ProductsView: React.FC = () => {
 
         {/* LIST */}
         <div className="lg:col-span-2 bg-white rounded-xl border overflow-hidden">
+          <div className="p-4 border-b bg-white">
+            <div className="flex gap-2 items-center">
+              <input
+                value={search}
+                onChange={(e) => setSearch(e.target.value)}
+                placeholder="Buscar por nombre, SKU o descripción..."
+                className="w-full p-2 border rounded"
+              />
+              {search ? (
+                <button
+                  type="button"
+                  onClick={() => setSearch("")}
+                  className="px-3 py-2 border rounded text-sm"
+                >
+                  Limpiar
+                </button>
+              ) : null}
+            </div>
+
+            {search ? (
+
+              <div className="mt-2 text-xs text-gray-500">
+                {searching
+                  ? "Cargando productos para búsqueda..."
+                  : `Resultados: ${searchResults.length}`}
+                {!allLoaded && !searching ? " (cargando cache...)" : ""}
+              </div>
+            ) : null}
+          </div>
+
           {loading ? (
             <div className="p-10 text-center text-gray-500">Cargando...</div>
           ) : (
@@ -767,7 +894,8 @@ const ProductsView: React.FC = () => {
                 </thead>
 
                 <tbody className="divide-y">
-                  {products.map((prod) => {
+                  {listToRender.map((prod) => {
+
                     const hasVariants = (prod.variants?.length ?? 0) > 0;
                     const displayPrice = hasVariants
                       ? `Desde ${formatCOP(Math.min(...prod.variants.map((v) => v.price || 0)))}`
@@ -849,19 +977,19 @@ const ProductsView: React.FC = () => {
                   ) : null}
                 </tbody>
               </table>
-              <Paginator
-                page={page}
-                hasNext={hasNext}
-                hasPrev={history.length > 0}
-                loading={loadingPage}
-                onNext={goNext}
-                onPrev={goPrev}
-              />
+              {!search ? (
+                <Paginator
+                  page={page}
+                  hasNext={hasNext}
+                  hasPrev={history.length > 0}
+                  loading={loadingPage}
+                  onNext={goNext}
+                  onPrev={goPrev}
+                />
+              ) : null}
             </div>
-
           )}
         </div>
-
       </div>
 
       {/* EDIT MODAL */}
@@ -1124,7 +1252,6 @@ const ProductsView: React.FC = () => {
         </div>
       )}
 
-
       {uploading && (
         <div className="fixed inset-0 z-[999] bg-black/40 flex items-center justify-center p-4">
           <div className="bg-white w-full max-w-md rounded-2xl p-5 shadow-xl">
@@ -1158,8 +1285,6 @@ const ProductsView: React.FC = () => {
           </div>
         </div>
       )}
-
-
 
     </div>
   );
