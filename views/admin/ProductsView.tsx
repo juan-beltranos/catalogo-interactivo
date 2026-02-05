@@ -27,7 +27,7 @@ import VariantsEditor from "@/components/admin/VariantsEditor";
 import { compressImage } from "@/helpers/imageCompression";
 import { MAX_VIDEO_MB, validateVideoFile } from "@/helpers/videoValidation";
 import Paginator from "@/components/catalog/Paginator";
-import { deleteCloudinaryAsset, cldImg, uploadImageToCloudinary } from "@/helpers/cloudinaryUpload";
+import { deleteCloudinaryAsset, cldImg, uploadImageToCloudinary, signCloudinaryUpload, uploadToCloudinarySigned } from "@/helpers/cloudinaryUpload";
 import { ref, uploadBytes, getDownloadURL, deleteObject } from "firebase/storage";
 import { storage } from "../../lib/firebase";
 import ImportProductsExcel from "@/components/catalog/ImportProductsExcel";
@@ -220,6 +220,7 @@ const ProductsView: React.FC = () => {
   // --- Images upload helper ---
   const uploadImages = async (files: File[]): Promise<ImageItem[]> => {
     if (!storeId || !files.length) return [];
+    if (uploading) return []; 
 
     setUploading(true);
     setUploadProgress({ done: 0, total: files.length, currentName: "" });
@@ -227,19 +228,29 @@ const ProductsView: React.FC = () => {
     try {
       const uploaded: ImageItem[] = [];
 
+      // ✅ una sola firma para todo el lote
+      const signed = await signCloudinaryUpload({ storeId, kind: "products" });
+
       for (let i = 0; i < files.length; i++) {
         const f = files[i];
         setUploadProgress({ done: i, total: files.length, currentName: f.name });
 
-        // ✅ Sí: aquí sigues optimizando ANTES de subir (tu compressImage)
         const optimizedBlob = await compressImage(f);
-        const optimizedFile = new File([optimizedBlob], f.name.replace(/\.\w+$/, ".jpg"), { type: "image/jpeg" });
+        const optimizedFile = new File(
+          [optimizedBlob],
+          f.name.replace(/\.\w+$/, ".jpg"),
+          { type: "image/jpeg" }
+        );
 
-        const up = await uploadImageToCloudinary(storeId, optimizedFile);
+        const up = await uploadToCloudinarySigned({
+          file: optimizedFile,
+          signed,
+          resourceType: "image",
+        });
 
         uploaded.push({
-          url: up.url,
-          publicId: up.publicId,
+          url: up.secure_url,
+          publicId: up.public_id,
         });
       }
 

@@ -1,67 +1,81 @@
 import { getFunctions, httpsCallable } from "firebase/functions";
 import app from "@/lib/firebase";
-import { CloudImageItem, SignedPayload } from "@/types";
+import { CloudImageItem, SignedPayload, UploadResult } from "@/types";
 
-type SignResponse = {
-    cloudName: string;
-    apiKey: string;
-    timestamp: number;
-    signature: string;
-    folder?: string;
-    publicId?: string; 
-};
+const functions = getFunctions(app, "us-central1");
 
-type UploadResult = {
-    secure_url: string;
-    public_id: string;
-    width?: number;
-    height?: number;
-    format?: string;
-    bytes?: number;
-};
-
-export async function signCloudinaryUpload(storeId: string, opts?: { folder?: string; publicId?: string; resourceType?: "image" | "video" }) {
-    const functions = getFunctions(app, "us-central1");
+export async function signCloudinaryUpload(params: {
+    storeId: string;
+    kind?: "products" | "videos";
+}): Promise<SignedPayload> {
     const fn = httpsCallable(functions, "cloudinarySignUpload");
-
-    const res = await fn({
-        storeId,
-        folder: opts?.folder,
-        publicId: opts?.publicId,
-        resourceType: opts?.resourceType ?? "image",
-    });
-
-    return res.data as SignResponse;
+    const res = await fn({ storeId: params.storeId, kind: params.kind ?? "products" });
+    return res.data as SignedPayload;
 }
 
-export async function uploadToCloudinarySigned(file: File, sign: SignResponse, resourceType: "image" | "video" = "image") {
+export async function uploadToCloudinarySigned(params: {
+    file: File;
+    signed: SignedPayload;
+    resourceType?: "image" | "video";
+    onProgress?: (pct: number) => void;
+}): Promise<UploadResult> {
+    const { file, signed, resourceType = "image", onProgress } = params;
+
     const endpoint =
         resourceType === "video"
-            ? `https://api.cloudinary.com/v1_1/${sign.cloudName}/video/upload`
-            : `https://api.cloudinary.com/v1_1/${sign.cloudName}/image/upload`;
+            ? `https://api.cloudinary.com/v1_1/${signed.cloudName}/video/upload`
+            : `https://api.cloudinary.com/v1_1/${signed.cloudName}/image/upload`;
 
     const form = new FormData();
     form.append("file", file);
-    form.append("api_key", sign.apiKey);
-    form.append("timestamp", String(sign.timestamp));
-    form.append("signature", sign.signature);
+    form.append("api_key", signed.apiKey);
+    form.append("timestamp", String(signed.timestamp));
+    form.append("signature", signed.signature);
+    form.append("folder", signed.folder);
+    form.append("overwrite", signed.overwrite ? "true" : "false");
 
-    if (sign.folder) form.append("folder", sign.folder);
-    if (sign.publicId) form.append("public_id", sign.publicId);
-
-    // súper recomendado para optimizar entrega en Cloudinary:
-    form.append("overwrite", "true");
+    if (onProgress) {
+        return await uploadToCloudinaryWithProgress(endpoint, form, onProgress);
+    }
 
     const r = await fetch(endpoint, { method: "POST", body: form });
+    const data = await r.json();
+
     if (!r.ok) {
-        const txt = await r.text();
-        throw new Error(`Cloudinary upload failed: ${txt}`);
+        throw new Error(data?.error?.message || JSON.stringify(data));
     }
-    return (await r.json()) as UploadResult;
+
+    return data as UploadResult;
 }
 
-export async function deleteCloudinaryAsset(storeId: string, publicId: string, resourceType: "image" | "video" = "image") {
-    const functions = getFunctions(app, "us-central1");
+export async function uploadImageToCloudinary(
+    storeId: string,
+    file: File,
+    onProgress?: (pct: number) => void
+): Promise<CloudImageItem> {
+    const signed = await signCloudinaryUpload({ storeId, kind: "products" });
+
+    const data = await uploadToCloudinarySigned({
+        file,
+        signed,
+        resourceType: "image",
+        onProgress,
+    });
+
+    return {
+        url: data.secure_url,
+        publicId: data.public_id,
+        width: data.width,
+        height: data.height,
+        bytes: data.bytes,
+    };
+}
+
+export async function deleteCloudinaryAsset(
+    storeId: string,
+    publicId: string,
+    resourceType: "image" | "video" = "image"
+) {
     const fn = httpsCallable(functions, "cloudinaryDeleteAsset");
     const res = await fn({ storeId, publicId, resourceType });
     return res.data as any;
@@ -70,7 +84,7 @@ export async function deleteCloudinaryAsset(storeId: string, publicId: string, r
 export function uploadToCloudinaryWithProgress(
     endpoint: string,
     form: FormData,
-    onProgress?: (pct: number) => void
+    onProgress: (pct: number) => void
 ): Promise<UploadResult> {
     return new Promise((resolve, reject) => {
         const xhr = new XMLHttpRequest();
@@ -79,13 +93,15 @@ export function uploadToCloudinaryWithProgress(
         xhr.upload.onprogress = (evt) => {
             if (!evt.lengthComputable) return;
             const pct = Math.round((evt.loaded / evt.total) * 100);
-            onProgress?.(pct);
+            onProgress(pct);
         };
 
         xhr.onload = () => {
-            if (xhr.status >= 200 && xhr.status < 300) {
-                resolve(JSON.parse(xhr.responseText));
-            } else {
+            try {
+                const json = JSON.parse(xhr.responseText || "{}");
+                if (xhr.status >= 200 && xhr.status < 300) resolve(json);
+                else reject(new Error(json?.error?.message || xhr.responseText || "Upload failed"));
+            } catch {
                 reject(new Error(xhr.responseText || "Upload failed"));
             }
         };
@@ -97,12 +113,7 @@ export function uploadToCloudinaryWithProgress(
 
 export function cldImg(
     url: string,
-    opts?: {
-        w?: number;
-        h?: number;
-        crop?: "fill" | "limit";
-        q?: string;        // "auto" recomendado
-    }
+    opts?: { w?: number; h?: number; crop?: "fill" | "limit"; q?: string }
 ) {
     if (!url) return url;
 
@@ -115,9 +126,9 @@ export function cldImg(
     if (parts.length !== 2) return url;
 
     const t = [
-        "f_auto",          // ✅ cloudinary elige webp/avif si soporta
-        `q_${q}`,          // ✅ compresión inteligente
-        "dpr_auto",        // ✅ retina sin pedir imágenes gigantes
+        "f_auto",
+        `q_${q}`,
+        "dpr_auto",
         crop === "fill" ? "c_fill" : "c_limit",
         `w_${w}`,
         h ? `h_${h}` : null,
@@ -126,47 +137,4 @@ export function cldImg(
         .join(",");
 
     return `${parts[0]}/upload/${t}/${parts[1]}`;
-}
-
-
-export async function uploadImageToCloudinary(storeId: string, file: File): Promise<CloudImageItem> {
-    // ✅ usa el mismo app y la misma región que el resto
-    const functions = getFunctions(app, "us-central1");
-    const sign = httpsCallable(functions, "cloudinarySignUpload");
-
-    const signed = (await sign({ storeId, kind: "products" })).data as SignedPayload;
-
-    const form = new FormData();
-    form.append("file", file);
-    form.append("api_key", signed.apiKey);
-    form.append("timestamp", String(signed.timestamp));
-    form.append("signature", signed.signature);
-    form.append("folder", signed.folder);
-
-    // ✅ NO envíes overwrite si viene undefined
-    // y si viene boolean, conviértelo a "true"/"false"
-    if (typeof (signed as any).overwrite === "boolean") {
-        form.append("overwrite", (signed as any).overwrite ? "true" : "false");
-    } else {
-        // opcional: si quieres SIEMPRE overwrite true
-        form.append("overwrite", "true");
-    }
-
-    const endpoint = `https://api.cloudinary.com/v1_1/${signed.cloudName}/image/upload`;
-
-    const res = await fetch(endpoint, { method: "POST", body: form });
-    const data = await res.json();
-
-    if (!res.ok) {
-        // importante para ver el error real de cloudinary
-        throw new Error(data?.error?.message || JSON.stringify(data));
-    }
-
-    return {
-        url: data.secure_url,
-        publicId: data.public_id,
-        width: data.width,
-        height: data.height,
-        bytes: data.bytes,
-    };
 }
