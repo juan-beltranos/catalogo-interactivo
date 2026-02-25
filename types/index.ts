@@ -45,6 +45,8 @@ export type CartItem = {
     unitPrice: number; // COP int
     qty: number;
     imageUrl?: string;
+    originalUnitPrice?: number; // BASE sin descuento (opcional)
+    hasDiscount?: boolean;
 };
 
 

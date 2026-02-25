@@ -167,6 +167,21 @@ const ProductsView: React.FC = () => {
     }
   };
 
+  const downloadJson = (data: any, filename: string) => {
+    const json = JSON.stringify(data, null, 2);
+    const blob = new Blob([json], { type: "application/json;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+
+    URL.revokeObjectURL(url);
+  };
+
   const normalize = (s: string) =>
     (s || "")
       .toLowerCase()
@@ -220,7 +235,7 @@ const ProductsView: React.FC = () => {
   // --- Images upload helper ---
   const uploadImages = async (files: File[]): Promise<ImageItem[]> => {
     if (!storeId || !files.length) return [];
-    if (uploading) return []; 
+    if (uploading) return [];
 
     setUploading(true);
     setUploadProgress({ done: 0, total: files.length, currentName: "" });
@@ -664,6 +679,47 @@ const ProductsView: React.FC = () => {
 
   const listToRender = search ? searchResults : products;
 
+  const handleExportForStoreId = async (targetStoreId: string) => {
+    if (!targetStoreId) return;
+
+    try {
+      const targetProdsRef = collection(db, "stores", targetStoreId, "products");
+      const snap = await getDocs(query(targetProdsRef, orderBy("createdAt", "desc")));
+
+      // usa tu mapper (el mismo que usa la UI y sí trae images bien)
+      const exported = snap.docs.map((docSnap) => {
+        const p = mapDocToProduct(docSnap);
+
+        // 1 sola imagen (url pública)
+        const imageUrl = p.images?.[0]?.url ?? "";
+
+        // precio simple (elige UNO):
+        // A) igual a tu tabla: si tiene variants, mínimo; si no, price base
+        const hasVariants = (p.variants?.length ?? 0) > 0;
+        const price = hasVariants
+          ? Math.min(...p.variants!.map((v) => Number(v.price || 0)).filter((n) => n > 0))
+          : Number(p.price || 0);
+
+        return {
+          id: p.id,
+          name: p.name ?? "",
+          price,
+          description: p.description ?? "",
+          image: imageUrl,
+        };
+      });
+
+      downloadJson(exported, `products_simple_${targetStoreId}.json`);
+    } catch (e) {
+      console.error(e);
+      alert("Error exportando productos");
+    }
+  };
+
+
+
+
+
   return (
     <div className="space-y-8">
       <div className="flex justify-between items-center">
@@ -671,6 +727,14 @@ const ProductsView: React.FC = () => {
       </div>
 
       {storeId ? <ImportProductsExcel storeId={storeId} /> : null}
+      {/* <button
+        type="button"
+        onClick={() => handleExportForStoreId("XHlEj6EI8NCL5QVS4mo2")}
+        className="px-4 py-2 rounded-lg border bg-white hover:bg-gray-50 text-sm"
+      >
+        Exportar JSON (Store XHlEj6EI8NCL5QVS4mo2)
+      </button> */}
+
 
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
         {/* CREATE */}

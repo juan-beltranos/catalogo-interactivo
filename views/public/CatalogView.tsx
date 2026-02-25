@@ -22,6 +22,7 @@ import { CartItem, Category, Variant } from "@/types";
 import { buildWaLink, calcTotal, cartStorageKey, formatCOP, getProductDisplayPrice, getProductMainImage, norm } from "@/helpers";
 import { ImageCarousel } from "@/components/catalog/ImageCarousel";
 import { cldImg } from "@/helpers/cloudinaryUpload";
+import { applyDiscount, discountBadgeText, getBaseUnitPrice, getFinalUnitPrice, getProductCardPrice } from "@/helpers/pricing";
 
 const PAGE_SIZE = 20;
 const ALL_BATCH = 500;
@@ -180,7 +181,8 @@ const CatalogView: React.FC = () => {
 
 
   const addToCart = (prod: Product, variant?: Variant) => {
-    const unitPrice = variant ? Number(variant.price || 0) : Number(prod.price || 0);
+    const baseUnitPrice = getBaseUnitPrice(prod, variant);
+    const unitPrice = getFinalUnitPrice(prod, variant);
     if (!unitPrice) return;
 
     if (variant && typeof variant.stock === "number" && variant.stock <= 0) {
@@ -194,6 +196,8 @@ const CatalogView: React.FC = () => {
       variantId: variant?.id,
       variantTitle: variant?.title,
       unitPrice,
+      originalUnitPrice: baseUnitPrice,
+      hasDiscount: hasValidDiscount((prod as any).discount),
       qty: 1,
       imageUrl: getProductMainImage(prod),
     };
@@ -352,41 +356,12 @@ const CatalogView: React.FC = () => {
     }
   };
 
-  const getDiscountBadge = (p: Product) => {
-    const d = p.discount;
-    if (!d || !d.value) return null;
 
-    if (d.type === "percent") {
-      const pct = Math.min(100, Math.max(0, Number(d.value) || 0));
-      if (!pct) return null;
-      return `-${pct}%`;
-    }
-
-    const amt = Math.max(0, Number(d.value) || 0);
-    if (!amt) return null;
-    return `-${formatCOP(amt)}`;
-  };
-
-  const getFinalPriceNumber = (p: Product) => {
-    const base = Number(p.price || 0);
-    const d = p.discount;
-
-    if (!d || !d.value) return base;
-
-    if (d.type === "percent") {
-      const pct = Math.min(100, Math.max(0, Number(d.value) || 0));
-      return Math.max(0, Math.round(base * (1 - pct / 100)));
-    }
-
-    const amt = Math.max(0, Number(d.value) || 0);
-    return Math.max(0, base - amt);
-  };
-
-  const hasValidDiscount = (p: Product) => {
-    const d = p.discount;
+  const hasValidDiscount = (p?: Product | null) => {
+    const d = p?.discount;
     if (!d || !d.value) return false;
-    if (d.type === "percent") return Number(d.value) > 0;
-    return Number(d.value) > 0;
+    const v = Number(d.value) || 0;
+    return v > 0;
   };
 
   const fetchFirstPage = async () => {
@@ -690,11 +665,10 @@ const CatalogView: React.FC = () => {
             {filteredProducts.map((prod) => {
               const img = getProductMainImage(prod);
               const imgOptim = img ? cldImg(img, { w: 600, h: 600, crop: "fill" }) : "";
-              const priceInfo = getProductDisplayPrice(prod);
               const hasVariants = (prod.variants?.length ?? 0) > 0;
-              const badge = getDiscountBadge(prod);
-              const hasDisc = hasValidDiscount(prod);
-              const finalPriceNum = getFinalPriceNumber(prod);
+              const badge = discountBadgeText((prod as any).discount);
+              const discOk = hasValidDiscount(prod);
+              const cardPrice = getProductCardPrice(prod);
 
 
               return (
@@ -702,7 +676,12 @@ const CatalogView: React.FC = () => {
                   key={prod.id}
                   className="group bg-white rounded-2xl border border-gray-100 shadow-sm hover:shadow-md transition overflow-hidden flex flex-col"
                 >
-                  <div className="relative aspect-square bg-gray-100 overflow-hidden">
+                  <button
+                    type="button"
+                    onClick={() => openAddFlow(prod)}
+                    className="relative aspect-square bg-gray-100 overflow-hidden text-left"
+                    aria-label={`Ver ${prod.name}`}
+                  >
                     {img ? (
                       <img
                         src={imgOptim}
@@ -719,20 +698,13 @@ const CatalogView: React.FC = () => {
 
                     {/* Badge descuento */}
                     {badge ? (
-                      <div className="absolute top-3 left-3 z-20">
+                      <div className="absolute top-3 left-3 z-20 pointer-events-none">
                         <span className="inline-flex items-center rounded-full bg-yellow-400 text-white px-3 py-1 text-xs font-extrabold shadow-sm">
                           {badge}
                         </span>
                       </div>
                     ) : null}
-
-                    {/* Label precio (tu label actual) */}
-                    <div className="absolute left-3 bottom-3 z-20">
-                      <span className="inline-flex items-center rounded-full bg-white/90 backdrop-blur px-3 py-1 text-xs font-extrabold  border border-indigo-50 shadow-sm">
-                        {priceInfo.label}
-                      </span>
-                    </div>
-                  </div>
+                  </button>
 
                   <div className="p-3 sm:p-4 flex-1 flex flex-col">
                     <div className="flex flex-col gap-1">
@@ -767,24 +739,28 @@ const CatalogView: React.FC = () => {
                     )}
 
                     {/* Precio tachado + final (solo si NO hay variantes) */}
-                    {/* {!hasVariants ? (
-                      <div className="mt-2">
-                        {hasDisc ? (
-                          <div className="flex items-baseline gap-2">
-                            <span className="text-xs text-gray-400 line-through font-bold">
-                              {formatCOP(Number(prod.price || 0))}
-                            </span>
-                            <span className="text-sm font-extrabold ">
-                              {formatCOP(finalPriceNum)}
-                            </span>
-                          </div>
-                        ) : (
-                          <div className="text-sm font-extrabold ">
-                            {formatCOP(Number(prod.price || 0))}
-                          </div>
-                        )}
-                      </div>
-                    ) : null} */}
+                    <div className="mt-2">
+                      {discOk ? (
+                        <div className="flex items-baseline gap-2">
+                          <span className="text-xs text-gray-400 line-through font-bold">
+                            {cardPrice.hasVariants
+                              ? `Desde ${formatCOP(cardPrice.base)}`
+                              : formatCOP(cardPrice.base)}
+                          </span>
+                          <span className="text-sm font-extrabold">
+                            {cardPrice.hasVariants
+                              ? `Desde ${formatCOP(cardPrice.final)}`
+                              : formatCOP(cardPrice.final)}
+                          </span>
+                        </div>
+                      ) : (
+                        <div className="text-sm font-extrabold">
+                          {cardPrice.hasVariants
+                            ? `Desde ${formatCOP(cardPrice.base)}`
+                            : formatCOP(cardPrice.base)}
+                        </div>
+                      )}
+                    </div>
 
 
                     <button
@@ -891,9 +867,30 @@ const CatalogView: React.FC = () => {
               {/* Price */}
               <div className="flex items-center justify-between">
                 <div className="text-sm text-gray-500">Precio</div>
-                <div className="font-extrabold ">
-                  {getProductDisplayPrice(productModal.product).label}
-                </div>
+                {(() => {
+                  const modalPrice = getProductCardPrice(productModal.product);
+
+                  return (
+                    <div className="flex items-center justify-between">
+                      <div className="text-sm text-gray-500">Precio</div>
+
+                      <div className="font-extrabold">
+                        {hasValidDiscount(productModal.product) ? (
+                          <div className="flex items-baseline gap-2">
+                            <span className="text-xs text-gray-400 line-through font-bold">
+                              {modalPrice.hasVariants ? `Desde ${formatCOP(modalPrice.base)}` : formatCOP(modalPrice.base)}
+                            </span>
+                            <span>
+                              {modalPrice.hasVariants ? `Desde ${formatCOP(modalPrice.final)}` : formatCOP(modalPrice.final)}
+                            </span>
+                          </div>
+                        ) : (
+                          modalPrice.hasVariants ? `Desde ${formatCOP(modalPrice.base)}` : formatCOP(modalPrice.base)
+                        )}
+                      </div>
+                    </div>
+                  );
+                })()}
               </div>
 
               {/* Variants */}
@@ -905,6 +902,9 @@ const CatalogView: React.FC = () => {
                     {(productModal.product.variants || []).map((v) => {
                       const outOfStock = typeof v.stock === "number" && v.stock <= 0;
                       const selected = productModal.selectedVariantId === v.id;
+                      const d = (productModal.product as any).discount;
+                      const base = Number(v.price || 0);
+                      const final = applyDiscount(base, d);
 
                       return (
                         <button
@@ -925,8 +925,17 @@ const CatalogView: React.FC = () => {
                               {typeof v.stock === "number" ? (outOfStock ? "Agotado" : `Stock: ${v.stock}`) : "Stock no definido"}
                             </div>
                           </div>
-                          <div className="font-extrabold ">
-                            {formatCOP(Number(v.price || 0))}
+
+
+                          <div className="font-extrabold">
+                            {hasValidDiscount(productModal.product) ? (
+                              <div className="flex items-baseline gap-2">
+                                <span className="text-xs text-gray-400 line-through font-bold">{formatCOP(base)}</span>
+                                <span>{formatCOP(final)}</span>
+                              </div>
+                            ) : (
+                              formatCOP(base)
+                            )}
                           </div>
                         </button>
                       );
@@ -1023,8 +1032,17 @@ const CatalogView: React.FC = () => {
                         {it.variantTitle ? (
                           <div className="text-xs text-gray-500">{it.variantTitle}</div>
                         ) : null}
-                        <div className="text-sm  font-extrabold mt-1">
-                          {formatCOP(it.unitPrice)}
+                        <div className="text-sm font-extrabold mt-1">
+                          {typeof it.originalUnitPrice === "number" && it.originalUnitPrice > it.unitPrice ? (
+                            <div className="flex items-baseline gap-2">
+                              <span className="text-xs text-gray-400 line-through font-bold">
+                                {formatCOP(it.originalUnitPrice)}
+                              </span>
+                              <span>{formatCOP(it.unitPrice)}</span>
+                            </div>
+                          ) : (
+                            formatCOP(it.unitPrice)
+                          )}
                         </div>
                         <div className="text-xs text-gray-500 mt-1">
                           Subtotal: <b>{formatCOP(it.unitPrice * it.qty)}</b>
