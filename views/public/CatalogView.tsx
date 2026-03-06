@@ -822,34 +822,41 @@ const CatalogView: React.FC = () => {
       {productModal.open && productModal.product && (
         <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center p-0 sm:p-4 bg-black/50">
           <div className="bg-white w-full sm:max-w-lg rounded-t-3xl sm:rounded-3xl overflow-hidden shadow-xl">
+            {/* Header */}
             <div className="p-4 sm:p-6 border-b flex items-start justify-between gap-3">
-              <div className="min-w-0">
-                <div className="text-lg sm:text-xl font-extrabold text-gray-900 truncate">
+              <div className="min-w-0 flex-1">
+                <div className="text-lg sm:text-xl font-extrabold text-gray-900 break-words">
                   {productModal.product.name}
                 </div>
-                {productModal.product.description ? (
-                  <div className="text-sm text-gray-500 line-clamp-2">
-                    {productModal.product.description}
-                  </div>
-                ) : (
-                  <div className="text-sm text-gray-500"> </div>
-                )}
               </div>
 
               <button
-                onClick={() => setProductModal({ open: false, product: null, selectedVariantId: null })}
-                className="h-10 w-10 rounded-full border flex items-center justify-center hover:bg-gray-50"
+                onClick={() =>
+                  setProductModal({ open: false, product: null, selectedVariantId: null })
+                }
+                className="h-10 w-10 rounded-full border flex items-center justify-center hover:bg-gray-50 shrink-0"
                 aria-label="Cerrar"
               >
                 <i className="fa-solid fa-xmark" />
               </button>
             </div>
 
+            {/* Body */}
             <div className="p-4 sm:p-6 space-y-4 max-h-[75vh] overflow-auto">
               <ImageCarousel
                 images={(productModal.product.images || []).map((x: any) => x.url).filter(Boolean)}
                 alt={productModal.product.name}
               />
+
+              {/* Descripción completa con scroll interno */}
+              {productModal.product.description ? (
+                <div className="space-y-2">
+                  <div className="text-sm font-extrabold text-gray-900">Descripción</div>
+                  <div className="max-h-40 overflow-y-auto rounded-2xl border border-gray-200 bg-gray-50 p-3 text-sm text-gray-700 whitespace-pre-line break-words">
+                    {productModal.product.description}
+                  </div>
+                </div>
+              ) : null}
 
               {(productModal.product.videos?.length ?? 0) > 0 ? (
                 <div className="space-y-2">
@@ -871,23 +878,25 @@ const CatalogView: React.FC = () => {
                   const modalPrice = getProductCardPrice(productModal.product);
 
                   return (
-                    <div className="flex items-center justify-between">
-                      <div className="text-sm text-gray-500">Precio</div>
-
-                      <div className="font-extrabold">
-                        {hasValidDiscount(productModal.product) ? (
-                          <div className="flex items-baseline gap-2">
-                            <span className="text-xs text-gray-400 line-through font-bold">
-                              {modalPrice.hasVariants ? `Desde ${formatCOP(modalPrice.base)}` : formatCOP(modalPrice.base)}
-                            </span>
-                            <span>
-                              {modalPrice.hasVariants ? `Desde ${formatCOP(modalPrice.final)}` : formatCOP(modalPrice.final)}
-                            </span>
-                          </div>
-                        ) : (
-                          modalPrice.hasVariants ? `Desde ${formatCOP(modalPrice.base)}` : formatCOP(modalPrice.base)
-                        )}
-                      </div>
+                    <div className="font-extrabold">
+                      {hasValidDiscount(productModal.product) ? (
+                        <div className="flex items-baseline gap-2">
+                          <span className="text-xs text-gray-400 line-through font-bold">
+                            {modalPrice.hasVariants
+                              ? `Desde ${formatCOP(modalPrice.base)}`
+                              : formatCOP(modalPrice.base)}
+                          </span>
+                          <span>
+                            {modalPrice.hasVariants
+                              ? `Desde ${formatCOP(modalPrice.final)}`
+                              : formatCOP(modalPrice.final)}
+                          </span>
+                        </div>
+                      ) : modalPrice.hasVariants ? (
+                        `Desde ${formatCOP(modalPrice.base)}`
+                      ) : (
+                        formatCOP(modalPrice.base)
+                      )}
                     </div>
                   );
                 })()}
@@ -922,15 +931,20 @@ const CatalogView: React.FC = () => {
                           <div>
                             <div className="font-extrabold text-gray-900">{v.title}</div>
                             <div className="text-xs text-gray-500 mt-1">
-                              {typeof v.stock === "number" ? (outOfStock ? "Agotado" : `Stock: ${v.stock}`) : "Stock no definido"}
+                              {typeof v.stock === "number"
+                                ? outOfStock
+                                  ? "Agotado"
+                                  : `Stock: ${v.stock}`
+                                : "Stock no definido"}
                             </div>
                           </div>
-
 
                           <div className="font-extrabold">
                             {hasValidDiscount(productModal.product) ? (
                               <div className="flex items-baseline gap-2">
-                                <span className="text-xs text-gray-400 line-through font-bold">{formatCOP(base)}</span>
+                                <span className="text-xs text-gray-400 line-through font-bold">
+                                  {formatCOP(base)}
+                                </span>
                                 <span>{formatCOP(final)}</span>
                               </div>
                             ) : (
@@ -970,7 +984,9 @@ const CatalogView: React.FC = () => {
 
               <button
                 type="button"
-                onClick={() => setProductModal({ open: false, product: null, selectedVariantId: null })}
+                onClick={() =>
+                  setProductModal({ open: false, product: null, selectedVariantId: null })
+                }
                 className="w-full rounded-2xl py-3 font-extrabold border hover:bg-gray-50 mt-2"
               >
                 Cancelar
