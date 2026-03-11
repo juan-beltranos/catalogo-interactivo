@@ -42,6 +42,7 @@ const ProductsView: React.FC = () => {
   const [categories, setCategories] = useState<{ id: string; name: string }[]>([]);
   const [loading, setLoading] = useState(true);
 
+
   const [page, setPage] = useState(1);
   const [hasNext, setHasNext] = useState(false);
   const [loadingPage, setLoadingPage] = useState(false);
@@ -66,8 +67,9 @@ const ProductsView: React.FC = () => {
   const [discountValueInput, setDiscountValueInput] = useState(""); // "10" o "20000"
 
   // Variants (create)
-  const [useVariants, setUseVariants] = useState(false);
   const [createVariants, setCreateVariants] = useState<Variant[]>([]);
+  const [useVariants, setUseVariants] = useState(false);       // crear
+  const [editUseVariants, setEditUseVariants] = useState(false); // editar
 
   // Edit modal
   const [editSku, setEditSku] = useState("");
@@ -318,6 +320,7 @@ const ProductsView: React.FC = () => {
     setImageFiles([]);
     setVideoFiles([]);
     setUseVariants(false);
+    setCreateVariants([]);
   };
 
   // --- CREATE ---
@@ -420,12 +423,10 @@ const ProductsView: React.FC = () => {
   const openEdit = (p: Product) => {
     setEditingProduct(p);
     setEditPriceInput(String(p.price));
-    setUseVariants((p.variants?.length ?? 0) > 0);
+    setEditUseVariants((p.variants?.length ?? 0) > 0);
 
-    // SKU
     setEditSku(p.sku ?? "");
 
-    // Discount
     if (p.discount) {
       setEditHasDiscount(true);
       setEditDiscountType(p.discount.type);
@@ -467,7 +468,7 @@ const ProductsView: React.FC = () => {
         discount,
         categoryId: editingProduct.categoryId,
         options: [],
-        variants: useVariants ? (editingProduct.variants ?? []) : [],
+        variants: editUseVariants ? (editingProduct.variants ?? []) : [],
         images: editingProduct.images ?? [],
         videos: editingProduct.videos ?? [],
         updatedAt: serverTimestamp(),
@@ -908,7 +909,7 @@ const ProductsView: React.FC = () => {
             {useVariants ? (
               <VariantsEditor
                 variants={createVariants}
-                onChange={(vars) => setCreateVariants(vars)}
+                onChange={setCreateVariants}
               />
             ) : null}
 
@@ -1299,10 +1300,30 @@ const ProductsView: React.FC = () => {
 
               {/* Variants */}
               <div className="border rounded p-4 space-y-4">
-                <VariantsEditor
-                  variants={editingProduct.variants || []}
-                  onChange={(vars) => setEditingProduct({ ...editingProduct, variants: vars })}
-                />
+                <div className="flex items-center gap-2">
+                  <input
+                    id="editUseVariants"
+                    type="checkbox"
+                    checked={editUseVariants}
+                    onChange={(e) => {
+                      const checked = e.target.checked;
+                      setEditUseVariants(checked);
+                      if (!checked) {
+                        setEditingProduct({ ...editingProduct, variants: [] });
+                      }
+                    }}
+                  />
+                  <label htmlFor="editUseVariants" className="text-sm text-gray-700">
+                    Este producto tiene variantes
+                  </label>
+                </div>
+
+                {editUseVariants ? (
+                  <VariantsEditor
+                    variants={editingProduct.variants || []}
+                    onChange={(vars) => setEditingProduct({ ...editingProduct, variants: vars })}
+                  />
+                ) : null}
               </div>
 
               {/* Actions */}
