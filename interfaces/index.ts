@@ -56,3 +56,12 @@ export interface PaginatorProps {
     onPrev: () => void;
     className?: string;
 }
+
+export interface DeleteSignedPayload {
+    cloudName: string;
+    apiKey: string;
+    timestamp: number;
+    signature: string;
+    publicIds: string[];
+    resourceType: "image" | "video";
+}

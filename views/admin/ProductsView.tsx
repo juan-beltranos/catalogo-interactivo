@@ -27,7 +27,7 @@ import VariantsEditor from "@/components/admin/VariantsEditor";
 import { compressImage } from "@/helpers/imageCompression";
 import { MAX_VIDEO_MB, validateVideoFile } from "@/helpers/videoValidation";
 import Paginator from "@/components/catalog/Paginator";
-import { deleteCloudinaryAsset, cldImg, uploadImageToCloudinary, signCloudinaryUpload, uploadToCloudinarySigned } from "@/helpers/cloudinaryUpload";
+import { deleteCloudinaryAsset, cldImg, uploadImageToCloudinary, signCloudinaryUpload, uploadToCloudinarySigned, deleteCloudinaryAssets } from "@/helpers/cloudinaryUpload";
 import { ref, uploadBytes, getDownloadURL, deleteObject } from "firebase/storage";
 import { storage } from "../../lib/firebase";
 import ImportProductsExcel from "@/components/catalog/ImportProductsExcel";
@@ -399,14 +399,13 @@ const ProductsView: React.FC = () => {
     if (!window.confirm("¿Eliminar producto?")) return;
 
     try {
-      for (const img of prod.images || []) {
-        if (img.publicId) {
-          try {
-            await deleteCloudinaryAsset(storeId, img.publicId, "image");
-          } catch (e) {
-            console.warn("No se pudo borrar imagen en Cloudinary:", img.publicId, e);
-          }
-        }
+      // ✅ Una sola llamada para todas las imágenes
+      const imageIds = (prod.images || [])
+        .map(img => img.publicId)
+        .filter(Boolean) as string[];
+
+      if (imageIds.length) {
+        await deleteCloudinaryAssets(storeId, imageIds, "image");
       }
 
       await deleteDoc(doc(db, "stores", storeId, "products", prod.id));
@@ -416,9 +415,7 @@ const ProductsView: React.FC = () => {
       console.error(err);
       alert("Error al eliminar producto");
     }
-
   };
-
   // --- OPEN EDIT ---
   const openEdit = (p: Product) => {
     setEditingProduct(p);
@@ -500,24 +497,18 @@ const ProductsView: React.FC = () => {
   // --- REMOVE one image from edit modal (and storage) ---
   const removeImageFromEdit = async (index: number) => {
     if (!editingProduct || !storeId) return;
-
     const img = editingProduct.images?.[index];
     if (!img) return;
-
     if (!window.confirm("¿Eliminar esta imagen?")) return;
 
     try {
-      // 1) borrar en Cloudinary vía Function
       if (img.publicId) {
-        await deleteCloudinaryAsset(storeId, img.publicId, "image");
+        await deleteCloudinaryAssets(storeId, [img.publicId], "image");
       }
     } catch (e) {
       console.warn("No se pudo borrar en Cloudinary", e);
-      // si quieres, puedes abortar aquí para no quitarla del UI:
-      // return;
     }
 
-    // 2) quitar del estado local (se guardará cuando le des “Guardar cambios”)
     const next = [...(editingProduct.images || [])];
     next.splice(index, 1);
     setEditingProduct({ ...editingProduct, images: next });

@@ -96,64 +96,55 @@ export const cloudinarySignUpload = onCall(
     }
 );
 
-/**
- * Borra un asset en Cloudinary (image/video) validando dueño de la tienda.
- */
-export const cloudinaryDeleteAsset = onCall(
+
+export const cloudinarySignDelete = onCall(
     {
         region: "us-central1",
         secrets: [CLOUDINARY_CLOUD_NAME, CLOUDINARY_API_KEY, CLOUDINARY_API_SECRET],
-        memory: "256MiB",
-        timeoutSeconds: 30,
+        memory: "128MiB",
+        timeoutSeconds: 10,
         minInstances: 0,
         maxInstances: 2,
     },
     async (request) => {
-        const t0 = Date.now();
-
         if (!request.auth) throw new HttpsError("unauthenticated", "Login required");
 
-        const { storeId, publicId, resourceType } = request.data as {
+        const { storeId, publicIds, resourceType } = request.data as {
             storeId: string;
-            publicId: string;
+            publicIds: string[];
             resourceType?: "image" | "video";
         };
 
         if (!storeId) throw new HttpsError("invalid-argument", "storeId required");
-        if (!publicId) throw new HttpsError("invalid-argument", "publicId required");
+        if (!publicIds?.length) throw new HttpsError("invalid-argument", "publicIds required");
 
         await assertStoreOwner(storeId, request.auth.uid);
-
         configureCloudinaryOnce();
 
-        const type: "image" | "video" = resourceType ?? "image";
+        const timestamp = Math.floor(Date.now() / 1000);
+        const type = resourceType ?? "image";
 
-        try {
-            const result = await cloudinary.uploader.destroy(publicId, {
-                resource_type: type,
-            });
+        // Cloudinary exige firmar: public_ids (ordenados), resource_type, timestamp
+        const publicIdsStr = [...publicIds].sort().join(",");
 
-            console.log("cloudinaryDeleteAsset", {
-                uid: request.auth.uid,
-                storeId,
-                publicId,
-                resourceType: type,
-                ms: Date.now() - t0,
-                cloudinaryResult: result?.result,
-            });
+        const paramsToSign: Record<string, any> = {
+            public_ids: publicIdsStr,
+            resource_type: type,
+            timestamp,
+        };
 
-            return { ok: true, result };
-        } catch (err: any) {
-            console.error("Cloudinary destroy error:", {
-                uid: request.auth.uid,
-                storeId,
-                publicId,
-                resourceType: type,
-                ms: Date.now() - t0,
-                message: err?.message,
-            });
+        const signature = cloudinary.utils.api_sign_request(
+            paramsToSign,
+            CLOUDINARY_API_SECRET.value()
+        );
 
-            throw new HttpsError("internal", err?.message || "Cloudinary delete failed");
-        }
+        return {
+            cloudName: CLOUDINARY_CLOUD_NAME.value(),
+            apiKey: CLOUDINARY_API_KEY.value(),
+            timestamp,
+            signature,
+            publicIds,
+            resourceType: type,
+        };
     }
 );
