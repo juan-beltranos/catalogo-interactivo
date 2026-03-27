@@ -72,16 +72,6 @@ export async function uploadImageToCloudinary(
     };
 }
 
-async function signCloudinaryDelete(params: {
-    storeId: string;
-    publicIds: string[];
-    resourceType?: "image" | "video";
-}): Promise<DeleteSignedPayload> {
-    const fn = httpsCallable(functions, "cloudinarySignDelete");
-    const res = await fn(params);
-    return res.data as DeleteSignedPayload;
-}
-
 export async function deleteCloudinaryAssets(
     storeId: string,
     publicIds: string[],
@@ -89,25 +79,8 @@ export async function deleteCloudinaryAssets(
 ): Promise<void> {
     if (!publicIds.length) return;
 
-    const signed = await signCloudinaryDelete({ storeId, publicIds, resourceType });
-
-    const endpoint = `https://api.cloudinary.com/v1_1/${signed.cloudName}/resources/${signed.resourceType}/upload`;
-
-    // Cloudinary bulk delete usa query params
-    const params = new URLSearchParams();
-    signed.publicIds.forEach(id => params.append("public_ids[]", id));
-    params.append("api_key", signed.apiKey);
-    params.append("timestamp", String(signed.timestamp));
-    params.append("signature", signed.signature);
-
-    const res = await fetch(`${endpoint}?${params.toString()}`, {
-        method: "DELETE",
-    });
-
-    if (!res.ok) {
-        const err = await res.json().catch(() => ({}));
-        throw new Error(err?.error?.message || "Cloudinary delete failed");
-    }
+    const fn = httpsCallable(functions, "cloudinaryDeleteAssets");
+    await fn({ storeId, publicIds, resourceType });
 }
 
 export function uploadToCloudinaryWithProgress(

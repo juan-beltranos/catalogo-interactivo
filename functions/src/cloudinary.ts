@@ -42,7 +42,7 @@ export const cloudinarySignUpload = onCall(
     {
         region: "us-central1",
         secrets: [CLOUDINARY_CLOUD_NAME, CLOUDINARY_API_KEY, CLOUDINARY_API_SECRET],
-        memory: "128MiB",
+        memory: "256MiB",
         timeoutSeconds: 10,
         minInstances: 0,
         maxInstances: 2,
@@ -97,12 +97,12 @@ export const cloudinarySignUpload = onCall(
 );
 
 
-export const cloudinarySignDelete = onCall(
+export const cloudinaryDeleteAssets = onCall(
     {
         region: "us-central1",
         secrets: [CLOUDINARY_CLOUD_NAME, CLOUDINARY_API_KEY, CLOUDINARY_API_SECRET],
-        memory: "128MiB",
-        timeoutSeconds: 10,
+        memory: "256MiB",
+        timeoutSeconds: 20,
         minInstances: 0,
         maxInstances: 2,
     },
@@ -121,30 +121,13 @@ export const cloudinarySignDelete = onCall(
         await assertStoreOwner(storeId, request.auth.uid);
         configureCloudinaryOnce();
 
-        const timestamp = Math.floor(Date.now() / 1000);
         const type = resourceType ?? "image";
 
-        // Cloudinary exige firmar: public_ids (ordenados), resource_type, timestamp
-        const publicIdsStr = [...publicIds].sort().join(",");
-
-        const paramsToSign: Record<string, any> = {
-            public_ids: publicIdsStr,
+        // ✅ Una sola llamada para todos los IDs
+        const result = await cloudinary.api.delete_resources(publicIds, {
             resource_type: type,
-            timestamp,
-        };
+        });
 
-        const signature = cloudinary.utils.api_sign_request(
-            paramsToSign,
-            CLOUDINARY_API_SECRET.value()
-        );
-
-        return {
-            cloudName: CLOUDINARY_CLOUD_NAME.value(),
-            apiKey: CLOUDINARY_API_KEY.value(),
-            timestamp,
-            signature,
-            publicIds,
-            resourceType: type,
-        };
+        return { ok: true, result };
     }
 );

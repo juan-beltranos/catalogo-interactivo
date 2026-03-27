@@ -1,1 +1,1 @@
-export { cloudinarySignUpload, cloudinaryDeleteAsset } from "./cloudinary";
+export { cloudinarySignUpload, cloudinaryDeleteAssets } from "./cloudinary";

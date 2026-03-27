@@ -42,9 +42,9 @@ export interface SidebarItemProps {
 }
 
 export interface Category {
-  id: string;
-  name: string;
-  order: number;
+    id: string;
+    name: string;
+    order: number;
 }
 
 export interface PaginatorProps {

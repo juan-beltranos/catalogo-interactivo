@@ -27,7 +27,7 @@ import VariantsEditor from "@/components/admin/VariantsEditor";
 import { compressImage } from "@/helpers/imageCompression";
 import { MAX_VIDEO_MB, validateVideoFile } from "@/helpers/videoValidation";
 import Paginator from "@/components/catalog/Paginator";
-import { deleteCloudinaryAsset, cldImg, uploadImageToCloudinary, signCloudinaryUpload, uploadToCloudinarySigned, deleteCloudinaryAssets } from "@/helpers/cloudinaryUpload";
+import { cldImg, uploadImageToCloudinary, signCloudinaryUpload, uploadToCloudinarySigned, deleteCloudinaryAssets } from "@/helpers/cloudinaryUpload";
 import { ref, uploadBytes, getDownloadURL, deleteObject } from "firebase/storage";
 import { storage } from "../../lib/firebase";
 import ImportProductsExcel from "@/components/catalog/ImportProductsExcel";

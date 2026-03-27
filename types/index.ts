@@ -121,8 +121,8 @@ export type SignedPayload = {
 };
 
 export type CloudImageItem = {
-    url: string;          
-    publicId: string;     
+    url: string;
+    publicId: string;
     width?: number;
     height?: number;
     bytes?: number;
