@@ -21,7 +21,7 @@ import {
 import { db } from "../../lib/firebase";
 import { useAuth } from "../../context/AuthContext";
 import { Product } from "@/interfaces";
-import { ImageItem, ProductOption, Variant, VideoItem } from "@/types";
+import { ImageItem, ImportedJsonProduct, ProductOption, Variant, VideoItem } from "@/types";
 import { formatCOP, parseCOP } from "@/helpers";
 import VariantsEditor from "@/components/admin/VariantsEditor";
 import { compressImage } from "@/helpers/imageCompression";
@@ -39,7 +39,7 @@ const ProductsView: React.FC = () => {
 
   const [storeId, setStoreId] = useState<string | null>(null);
   const [products, setProducts] = useState<Product[]>([]);
-  const [categories, setCategories] = useState<{ id: string; name: string }[]>([]);
+  const [categories, setCategories] = useState<{ id: string; name: string; order?: number }[]>([]);
   const [loading, setLoading] = useState(true);
 
 
@@ -101,6 +101,10 @@ const ProductsView: React.FC = () => {
   const [allProducts, setAllProducts] = useState<Product[]>([]);
   const [allLoaded, setAllLoaded] = useState(false);
 
+  const importJsonRef = useRef<HTMLInputElement | null>(null);
+
+
+
   // 1) storeId del usuario actual
   useEffect(() => {
     if (!user) return;
@@ -133,7 +137,13 @@ const ProductsView: React.FC = () => {
     const qCats = query(catsRef, orderBy("name", "asc"));
     const unsubCats = onSnapshot(qCats, (snap) => {
       //@ts-ignore
-      setCategories(snap.docs.map((d) => ({ id: d.id, name: d.data().name })));
+      setCategories(
+        snap.docs.map((d) => ({
+          id: d.id,
+          name: d.data().name,
+          order: d.data().order ?? 0,
+        }))
+      );
     });
 
     setLoading(true);
@@ -709,8 +719,257 @@ const ProductsView: React.FC = () => {
   };
 
 
+  const normalizeText = (value: any) =>
+    String(value ?? "")
+      .trim()
+      .toLowerCase()
+      .normalize("NFD")
+      .replace(/[\u0300-\u036f]/g, "");
 
+  const parseNumberSafe = (value: any) => {
+    if (typeof value === "number") return Number.isFinite(value) ? value : 0;
 
+    const raw = String(value ?? "").trim();
+    if (!raw) return 0;
+
+    // soporta 250000, 250.000, 250,000, $250.000
+    const cleaned = raw
+      .replace(/[^\d.,-]/g, "")
+      .replace(/\.(?=\d{3}\b)/g, "")
+      .replace(",", ".");
+
+    const num = Number(cleaned);
+    return Number.isFinite(num) ? num : 0;
+  };
+
+  const normalizeHtml = (value: any) => {
+    const str = String(value ?? "").trim();
+    if (!str) return "";
+    const looksLikeHtml = /<\/?[a-z][\s\S]*>/i.test(str);
+    return looksLikeHtml ? str : `<p>${str}</p>`;
+  };
+
+  const buildDiscount = (price: number, originalRaw: any) => {
+    const originalPrice = parseNumberSafe(originalRaw);
+
+    if (!originalPrice || originalPrice <= price) return null;
+
+    return {
+      type: "amount" as const,
+      value: originalPrice - price,
+    };
+  };
+  const htmlToPlainText = (value: any) => {
+    const str = String(value ?? "").trim();
+    if (!str) return "";
+
+    const temp = document.createElement("div");
+    temp.innerHTML = str;
+
+    return (temp.textContent || temp.innerText || "")
+      .replace(/\n\s*\n/g, "\n")
+      .replace(/[ \t]+/g, " ")
+      .trim();
+  };
+
+  const getOrCreateCategoryId = async (
+    categoryNameRaw: string,
+    categoryMap: Map<string, string>
+  ) => {
+    if (!storeId || !catsRef) return "";
+
+    const categoryName = String(categoryNameRaw || "").trim();
+    if (!categoryName) return "";
+
+    const normalizedName = normalizeText(categoryName);
+
+    // 1) revisar cache local del import actual
+    const cachedId = categoryMap.get(normalizedName);
+    if (cachedId) return cachedId;
+
+    // 2) revisar categorías ya cargadas en estado
+    const existing = categories.find(
+      (cat) => normalizeText(cat.name) === normalizedName
+    );
+    if (existing) {
+      categoryMap.set(normalizedName, existing.id);
+      return existing.id;
+    }
+
+    // 3) revisar Firestore por si ya existe pero el estado aún no se refrescó
+    const snap = await getDocs(query(catsRef, orderBy("name", "asc")));
+    const dbCategories = snap.docs.map((d) => ({
+      id: d.id,
+      name: d.data().name,
+      order: d.data().order ?? 0,
+    }));
+
+    const existingInDb = dbCategories.find(
+      (cat) => normalizeText(cat.name) === normalizedName
+    );
+
+    if (existingInDb) {
+      categoryMap.set(normalizedName, existingInDb.id);
+      return existingInDb.id;
+    }
+
+    const maxOrder = dbCategories.length
+      ? Math.max(...dbCategories.map((c) => Number(c.order ?? 0) || 0))
+      : 0;
+
+    const newRef = await addDoc(catsRef, {
+      name: categoryName,
+      order: maxOrder + 1,
+      createdAt: serverTimestamp(),
+      updatedAt: serverTimestamp(),
+    });
+
+    categoryMap.set(normalizedName, newRef.id);
+
+    return newRef.id;
+  };
+
+  const handleImportJsonFile = async (file: File) => {
+    if (!storeId || !prodsRef || !catsRef) {
+      alert("La tienda aún no está lista.");
+      return;
+    }
+
+    setIsSubmitting(true);
+
+    try {
+      const text = await file.text();
+
+      let parsed: any;
+      try {
+        parsed = JSON.parse(text);
+      } catch {
+        alert("El archivo no es un JSON válido.");
+        return;
+      }
+
+      const items: ImportedJsonProduct[] = Array.isArray(parsed)
+        ? parsed
+        : Array.isArray(parsed?.products)
+          ? parsed.products
+          : [];
+
+      if (!items.length) {
+        alert("No encontré productos. El JSON debe ser un array o { products: [] }");
+        return;
+      }
+
+      let imported = 0;
+      let skipped = 0;
+
+      const categoryMap = new Map<string, string>();
+
+      for (const item of items) {
+        const name = String(item.name ?? "").trim();
+        const price = parseNumberSafe(item.price);
+
+        if (!name || price <= 0) {
+          skipped++;
+          continue;
+        }
+
+        const categoryId = await getOrCreateCategoryId(
+          item.category ?? "",
+          categoryMap
+        );
+
+        const discount = buildDiscount(
+          price,
+          item.originalPrice ?? item.oldPrice ?? item.compareAtPrice
+        );
+
+        await addDoc(prodsRef, {
+          name,
+          sku: null,
+          description: htmlToPlainText(item.description),
+          price,
+          discount,
+          categoryId,
+          images: [],
+          videos: [],
+          options: [],
+          variants: [],
+          createdAt: serverTimestamp(),
+          updatedAt: serverTimestamp(),
+        });
+
+        imported++;
+      }
+
+      await loadFirstPage();
+      if (allLoaded) await reloadAllProducts();
+
+      if (importJsonRef.current) {
+        importJsonRef.current.value = "";
+      }
+
+      alert(`Importación completada. Importados: ${imported}. Omitidos: ${skipped}.`);
+    } catch (error) {
+      console.error(error);
+      alert("Error importando el JSON.");
+    } finally {
+      setIsSubmitting(false);
+    }
+  };
+
+  const handleDeleteTodayDocs = async () => {
+    if (!storeId) return;
+
+    const confirm = window.confirm(
+      "⚠️ Esto borrará TODOS los productos y categorías creados hoy. ¿Continuar?"
+    );
+    if (!confirm) return;
+
+    try {
+      const start = new Date("2026-04-04T00:00:00");
+      const end = new Date("2026-04-04T23:59:59");
+
+      // 🔥 PRODUCTS
+      const prodsRef = collection(db, "stores", storeId, "products");
+
+      const qProducts = query(
+        prodsRef,
+        where("createdAt", ">=", start),
+        where("createdAt", "<=", end)
+      );
+
+      const productsSnap = await getDocs(qProducts);
+
+      for (const docSnap of productsSnap.docs) {
+        await deleteDoc(docSnap.ref);
+      }
+
+      // 🔥 CATEGORIES
+      const catsRef = collection(db, "stores", storeId, "categories");
+
+      const qCategories = query(
+        catsRef,
+        where("createdAt", ">=", start),
+        where("createdAt", "<=", end)
+      );
+
+      const catsSnap = await getDocs(qCategories);
+
+      for (const docSnap of catsSnap.docs) {
+        await deleteDoc(docSnap.ref);
+      }
+
+      alert(
+        `✅ Eliminados:\nProductos: ${productsSnap.size}\nCategorías: ${catsSnap.size}`
+      );
+
+      await loadFirstPage();
+
+    } catch (err) {
+      console.error(err);
+      alert("❌ Error eliminando documentos");
+    }
+  };
 
   return (
     <div className="space-y-8">
@@ -718,14 +977,34 @@ const ProductsView: React.FC = () => {
         <h1 className="text-2xl font-bold">Productos</h1>
       </div>
 
-      {storeId ? <ImportProductsExcel storeId={storeId} /> : null}
-      {/* <button
-        type="button"
-        onClick={() => handleExportForStoreId("XHlEj6EI8NCL5QVS4mo2")}
-        className="px-4 py-2 rounded-lg border bg-white hover:bg-gray-50 text-sm"
-      >
-        Exportar JSON (Store XHlEj6EI8NCL5QVS4mo2)
-      </button> */}
+      {/* {storeId ? <ImportProductsExcel storeId={storeId} /> : null} */}
+      <div className="flex items-center gap-2">
+        <input
+          ref={importJsonRef}
+          type="file"
+          accept="application/json,.json"
+          className="hidden"
+          onChange={(e) => {
+            const file = e.target.files?.[0];
+            if (file) handleImportJsonFile(file);
+          }}
+        />
+        {/* <button
+          onClick={handleDeleteTodayDocs}
+          className="px-4 py-2 bg-red-600 text-white rounded-lg hover:bg-red-700"
+        >
+          🗑️ Borrar documentos de hoy
+        </button> */}
+
+        <button
+          type="button"
+          onClick={() => importJsonRef.current?.click()}
+          disabled={!storeId || isSubmitting}
+          className="px-4 py-2 rounded-lg bg-emerald-600 text-white font-medium hover:bg-emerald-700 disabled:opacity-50"
+        >
+          Importar JSON
+        </button>
+      </div>
 
 
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">

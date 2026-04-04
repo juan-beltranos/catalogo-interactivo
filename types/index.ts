@@ -127,3 +127,17 @@ export type CloudImageItem = {
     height?: number;
     bytes?: number;
 };
+
+export type ImportedJsonProduct = {
+    id?: string;
+    name?: string;
+    price?: number | string;
+    originalPrice?: number | string;
+    oldPrice?: number | string;
+    compareAtPrice?: number | string;
+    description?: string;
+    category?: string;
+    featured?: boolean;
+    hidden?: boolean;
+    quantity?: number | string;
+};
