@@ -27,10 +27,11 @@ import VariantsEditor from "@/components/admin/VariantsEditor";
 import { compressImage } from "@/helpers/imageCompression";
 import { MAX_VIDEO_MB, validateVideoFile } from "@/helpers/videoValidation";
 import Paginator from "@/components/catalog/Paginator";
-import { cldImg, uploadImageToCloudinary, signCloudinaryUpload, uploadToCloudinarySigned, deleteCloudinaryAssets } from "@/helpers/cloudinaryUpload";
+import { cldImg, uploadImagesToCloudinary } from "@/helpers/cloudinaryUpload";
 import { ref, uploadBytes, getDownloadURL, deleteObject } from "firebase/storage";
 import { storage } from "../../lib/firebase";
 import ImportProductsExcel from "@/components/catalog/ImportProductsExcel";
+import { cloudinaryConfig } from "@/lib/cloudinary";
 
 const PAGE_SIZE = 10;
 
@@ -253,36 +254,42 @@ const ProductsView: React.FC = () => {
     setUploadProgress({ done: 0, total: files.length, currentName: "" });
 
     try {
-      const uploaded: ImageItem[] = [];
+      const optimizedFiles: File[] = [];
 
-      // ✅ una sola firma para todo el lote
-      const signed = await signCloudinaryUpload({ storeId, kind: "products" });
-
-      for (let i = 0; i < files.length; i++) {
-        const f = files[i];
-        setUploadProgress({ done: i, total: files.length, currentName: f.name });
-
+      for (const f of files) {
         const optimizedBlob = await compressImage(f);
         const optimizedFile = new File(
           [optimizedBlob],
           f.name.replace(/\.\w+$/, ".jpg"),
           { type: "image/jpeg" }
         );
-
-        const up = await uploadToCloudinarySigned({
-          file: optimizedFile,
-          signed,
-          resourceType: "image",
-        });
-
-        uploaded.push({
-          url: up.secure_url,
-          publicId: up.public_id,
-        });
+        optimizedFiles.push(optimizedFile);
       }
 
-      setUploadProgress({ done: files.length, total: files.length, currentName: "" });
-      return uploaded;
+      const uploaded = await uploadImagesToCloudinary({
+        files: optimizedFiles,
+        cloudName: cloudinaryConfig.cloudName,
+        uploadPreset: cloudinaryConfig.uploadPreset,
+        folder: `stores/${storeId}/products`,
+        onFileProgress: (fileIndex, pct, fileName) => {
+          setUploadProgress({
+            done: fileIndex,
+            total: optimizedFiles.length,
+            currentName: `${fileName} (${pct}%)`,
+          });
+        },
+      });
+
+      setUploadProgress({
+        done: optimizedFiles.length,
+        total: optimizedFiles.length,
+        currentName: "",
+      });
+
+      return uploaded.map((img) => ({
+        url: img.url,
+        publicId: img.publicId,
+      }));
     } finally {
       setUploading(false);
     }
@@ -409,15 +416,6 @@ const ProductsView: React.FC = () => {
     if (!window.confirm("¿Eliminar producto?")) return;
 
     try {
-      // ✅ Una sola llamada para todas las imágenes
-      const imageIds = (prod.images || [])
-        .map(img => img.publicId)
-        .filter(Boolean) as string[];
-
-      if (imageIds.length) {
-        await deleteCloudinaryAssets(storeId, imageIds, "image");
-      }
-
       await deleteDoc(doc(db, "stores", storeId, "products", prod.id));
       await loadFirstPage();
       if (allLoaded) await reloadAllProducts();
@@ -426,6 +424,7 @@ const ProductsView: React.FC = () => {
       alert("Error al eliminar producto");
     }
   };
+
   // --- OPEN EDIT ---
   const openEdit = (p: Product) => {
     setEditingProduct(p);
@@ -494,33 +493,37 @@ const ProductsView: React.FC = () => {
 
   // --- ADD images in edit modal (append) ---
   const handleAddMoreImagesToEdit = async (files: FileList | null) => {
-    if (!files || !editingProduct) return;
+    if (!files || !editingProduct || !storeId) return;
+
     const list = Array.from(files);
     const uploaded = await uploadImages(list);
 
+    const nextImages = [...(editingProduct.images || []), ...uploaded];
+
+    await updateDoc(doc(db, "stores", storeId, "products", editingProduct.id), {
+      images: nextImages,
+      updatedAt: serverTimestamp(),
+    });
+
     setEditingProduct({
       ...editingProduct,
-      images: [...(editingProduct.images || []), ...uploaded],
+      images: nextImages,
     });
   };
 
   // --- REMOVE one image from edit modal (and storage) ---
   const removeImageFromEdit = async (index: number) => {
     if (!editingProduct || !storeId) return;
-    const img = editingProduct.images?.[index];
-    if (!img) return;
     if (!window.confirm("¿Eliminar esta imagen?")) return;
-
-    try {
-      if (img.publicId) {
-        await deleteCloudinaryAssets(storeId, [img.publicId], "image");
-      }
-    } catch (e) {
-      console.warn("No se pudo borrar en Cloudinary", e);
-    }
 
     const next = [...(editingProduct.images || [])];
     next.splice(index, 1);
+
+    await updateDoc(doc(db, "stores", storeId, "products", editingProduct.id), {
+      images: next,
+      updatedAt: serverTimestamp(),
+    });
+
     setEditingProduct({ ...editingProduct, images: next });
   };
 
@@ -680,43 +683,6 @@ const ProductsView: React.FC = () => {
   if (!storeId) return <div className="p-8 text-center">Buscando configuración de tienda...</div>;
 
   const listToRender = search ? searchResults : products;
-
-  const handleExportForStoreId = async (targetStoreId: string) => {
-    if (!targetStoreId) return;
-
-    try {
-      const targetProdsRef = collection(db, "stores", targetStoreId, "products");
-      const snap = await getDocs(query(targetProdsRef, orderBy("createdAt", "desc")));
-
-      // usa tu mapper (el mismo que usa la UI y sí trae images bien)
-      const exported = snap.docs.map((docSnap) => {
-        const p = mapDocToProduct(docSnap);
-
-        // 1 sola imagen (url pública)
-        const imageUrl = p.images?.[0]?.url ?? "";
-
-        // precio simple (elige UNO):
-        // A) igual a tu tabla: si tiene variants, mínimo; si no, price base
-        const hasVariants = (p.variants?.length ?? 0) > 0;
-        const price = hasVariants
-          ? Math.min(...p.variants!.map((v) => Number(v.price || 0)).filter((n) => n > 0))
-          : Number(p.price || 0);
-
-        return {
-          id: p.id,
-          name: p.name ?? "",
-          price,
-          description: p.description ?? "",
-          image: imageUrl,
-        };
-      });
-
-      downloadJson(exported, `products_simple_${targetStoreId}.json`);
-    } catch (e) {
-      console.error(e);
-      alert("Error exportando productos");
-    }
-  };
 
 
   const normalizeText = (value: any) =>
@@ -994,7 +960,7 @@ const ProductsView: React.FC = () => {
           className="px-4 py-2 bg-red-600 text-white rounded-lg hover:bg-red-700"
         >
           🗑️ Borrar documentos de hoy
-        </button> */}
+        </button>
 
         <button
           type="button"
@@ -1003,7 +969,7 @@ const ProductsView: React.FC = () => {
           className="px-4 py-2 rounded-lg bg-emerald-600 text-white font-medium hover:bg-emerald-700 disabled:opacity-50"
         >
           Importar JSON
-        </button>
+        </button> */}
       </div>
 
 

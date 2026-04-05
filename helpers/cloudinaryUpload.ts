@@ -1,66 +1,99 @@
-import { getFunctions, httpsCallable } from "firebase/functions";
-import app from "@/lib/firebase";
-import { CloudImageItem, SignedPayload, UploadResult } from "@/types";
-import { DeleteSignedPayload } from "@/interfaces";
+import { CloudImageItem, UploadResult } from "@/types";
 
-const functions = getFunctions(app, "us-central1");
+type CloudinaryResourceType = "image" | "video";
 
-export async function signCloudinaryUpload(params: {
-    storeId: string;
-    kind?: "products" | "videos";
-}): Promise<SignedPayload> {
-    const fn = httpsCallable(functions, "cloudinarySignUpload");
-    const res = await fn({ storeId: params.storeId, kind: params.kind ?? "products" });
-    return res.data as SignedPayload;
+type UploadUnsignedParams = {
+    file: File | Blob;
+    cloudName: string;
+    uploadPreset: string;
+    folder?: string;
+    resourceType?: CloudinaryResourceType;
+    fileName?: string;
+    tags?: string[];
+    context?: Record<string, string>;
+    onProgress?: (pct: number) => void;
+};
+
+function buildCloudinaryEndpoint(
+    cloudName: string,
+    resourceType: CloudinaryResourceType = "image"
+) {
+    return `https://api.cloudinary.com/v1_1/${cloudName}/${resourceType}/upload`;
 }
 
-export async function uploadToCloudinarySigned(params: {
-    file: File;
-    signed: SignedPayload;
-    resourceType?: "image" | "video";
-    onProgress?: (pct: number) => void;
-}): Promise<UploadResult> {
-    const { file, signed, resourceType = "image", onProgress } = params;
+function appendIfValue(form: FormData, key: string, value: unknown) {
+    if (value === undefined || value === null || value === "") return;
+    form.append(key, String(value));
+}
 
-    const endpoint =
-        resourceType === "video"
-            ? `https://api.cloudinary.com/v1_1/${signed.cloudName}/video/upload`
-            : `https://api.cloudinary.com/v1_1/${signed.cloudName}/image/upload`;
+export async function uploadToCloudinaryUnsigned({
+    file,
+    cloudName,
+    uploadPreset,
+    folder,
+    resourceType = "image",
+    fileName,
+    tags,
+    context,
+    onProgress,
+}: UploadUnsignedParams): Promise<UploadResult> {
+    const endpoint = buildCloudinaryEndpoint(cloudName, resourceType);
 
     const form = new FormData();
     form.append("file", file);
-    form.append("api_key", signed.apiKey);
-    form.append("timestamp", String(signed.timestamp));
-    form.append("signature", signed.signature);
-    form.append("folder", signed.folder);
-    form.append("overwrite", signed.overwrite ? "true" : "false");
+    form.append("upload_preset", uploadPreset);
+
+    appendIfValue(form, "folder", folder);
+
+    if (fileName) {
+        form.append("public_id", fileName);
+        form.append("use_filename", "true");
+        form.append("unique_filename", "true");
+    }
+
+    if (tags?.length) {
+        form.append("tags", tags.join(","));
+    }
+
+    if (context && Object.keys(context).length) {
+        const contextString = Object.entries(context)
+            .map(([k, v]) => `${k}=${v}`)
+            .join("|");
+        form.append("context", contextString);
+    }
 
     if (onProgress) {
         return await uploadToCloudinaryWithProgress(endpoint, form, onProgress);
     }
 
-    const r = await fetch(endpoint, { method: "POST", body: form });
+    const r = await fetch(endpoint, {
+        method: "POST",
+        body: form,
+    });
+
     const data = await r.json();
 
     if (!r.ok) {
-        throw new Error(data?.error?.message || JSON.stringify(data));
+        throw new Error(data?.error?.message || "Error subiendo archivo a Cloudinary");
     }
 
     return data as UploadResult;
 }
 
-export async function uploadImageToCloudinary(
-    storeId: string,
-    file: File,
-    onProgress?: (pct: number) => void
-): Promise<CloudImageItem> {
-    const signed = await signCloudinaryUpload({ storeId, kind: "products" });
-
-    const data = await uploadToCloudinarySigned({
-        file,
-        signed,
+export async function uploadImageToCloudinary(params: {
+    file: File;
+    cloudName: string;
+    uploadPreset: string;
+    folder?: string;
+    onProgress?: (pct: number) => void;
+}): Promise<CloudImageItem> {
+    const data = await uploadToCloudinaryUnsigned({
+        file: params.file,
+        cloudName: params.cloudName,
+        uploadPreset: params.uploadPreset,
+        folder: params.folder,
         resourceType: "image",
-        onProgress,
+        onProgress: params.onProgress,
     });
 
     return {
@@ -72,15 +105,39 @@ export async function uploadImageToCloudinary(
     };
 }
 
-export async function deleteCloudinaryAssets(
-    storeId: string,
-    publicIds: string[],
-    resourceType: "image" | "video" = "image"
-): Promise<void> {
-    if (!publicIds.length) return;
+export async function uploadImagesToCloudinary(params: {
+    files: File[];
+    cloudName: string;
+    uploadPreset: string;
+    folder?: string;
+    onFileProgress?: (fileIndex: number, pct: number, fileName: string) => void;
+}): Promise<CloudImageItem[]> {
+    const { files, cloudName, uploadPreset, folder, onFileProgress } = params;
 
-    const fn = httpsCallable(functions, "cloudinaryDeleteAssets");
-    await fn({ storeId, publicIds, resourceType });
+    const uploaded: CloudImageItem[] = [];
+
+    for (let i = 0; i < files.length; i++) {
+        const file = files[i];
+
+        const data = await uploadToCloudinaryUnsigned({
+            file,
+            cloudName,
+            uploadPreset,
+            folder,
+            resourceType: "image",
+            onProgress: (pct) => onFileProgress?.(i, pct, file.name),
+        });
+
+        uploaded.push({
+            url: data.secure_url,
+            publicId: data.public_id,
+            width: data.width,
+            height: data.height,
+            bytes: data.bytes,
+        });
+    }
+
+    return uploaded;
 }
 
 export function uploadToCloudinaryWithProgress(
@@ -101,8 +158,13 @@ export function uploadToCloudinaryWithProgress(
         xhr.onload = () => {
             try {
                 const json = JSON.parse(xhr.responseText || "{}");
-                if (xhr.status >= 200 && xhr.status < 300) resolve(json);
-                else reject(new Error(json?.error?.message || xhr.responseText || "Upload failed"));
+                if (xhr.status >= 200 && xhr.status < 300) {
+                    resolve(json);
+                } else {
+                    reject(
+                        new Error(json?.error?.message || xhr.responseText || "Upload failed")
+                    );
+                }
             } catch {
                 reject(new Error(xhr.responseText || "Upload failed"));
             }
