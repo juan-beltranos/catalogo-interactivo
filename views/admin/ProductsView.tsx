@@ -66,6 +66,7 @@ const ProductsView: React.FC = () => {
   const [hasDiscount, setHasDiscount] = useState(false);
   const [discountType, setDiscountType] = useState<"percent" | "amount">("percent");
   const [discountValueInput, setDiscountValueInput] = useState(""); // "10" o "20000"
+  const [isActive, setIsActive] = useState(true);
 
   // Variants (create)
   const [createVariants, setCreateVariants] = useState<Variant[]>([]);
@@ -338,6 +339,7 @@ const ProductsView: React.FC = () => {
     setVideoFiles([]);
     setUseVariants(false);
     setCreateVariants([]);
+    setIsActive(true);
   };
 
   // --- CREATE ---
@@ -381,6 +383,7 @@ const ProductsView: React.FC = () => {
         videos,
         options: [],
         variants,
+        isActive,
         createdAt: serverTimestamp(),
         updatedAt: serverTimestamp(),
       });
@@ -477,6 +480,7 @@ const ProductsView: React.FC = () => {
         variants: editUseVariants ? (editingProduct.variants ?? []) : [],
         images: editingProduct.images ?? [],
         videos: editingProduct.videos ?? [],
+        isActive: editingProduct.isActive ?? true,
         updatedAt: serverTimestamp(),
       });
 
@@ -574,6 +578,7 @@ const ProductsView: React.FC = () => {
       videos: (data.videos ?? []) as VideoItem[],
       options: (data.options ?? []) as ProductOption[],
       variants: (data.variants ?? []) as Variant[],
+      isActive: data.isActive ?? true,
     } satisfies Product;
   };
 
@@ -860,6 +865,7 @@ const ProductsView: React.FC = () => {
           videos: [],
           options: [],
           variants: [],
+          isActive,
           createdAt: serverTimestamp(),
           updatedAt: serverTimestamp(),
         });
@@ -934,6 +940,23 @@ const ProductsView: React.FC = () => {
     } catch (err) {
       console.error(err);
       alert("❌ Error eliminando documentos");
+    }
+  };
+
+  const toggleProductStatus = async (prod: Product) => {
+    if (!storeId) return;
+
+    try {
+      await updateDoc(doc(db, "stores", storeId, "products", prod.id), {
+        isActive: !prod.isActive,
+        updatedAt: serverTimestamp(),
+      });
+
+      await loadFirstPage();
+      if (allLoaded) await reloadAllProducts();
+    } catch (err) {
+      console.error(err);
+      alert("Error cambiando estado del producto");
     }
   };
 
@@ -1086,6 +1109,31 @@ const ProductsView: React.FC = () => {
               className="w-full p-2 border rounded"
             />
 
+            <div className="border rounded-lg p-3">
+              <div className="flex items-center justify-between">
+                <label htmlFor="isActive" className="text-sm font-medium text-gray-700">
+                  Visible en catálogo
+                </label>
+
+                <div className="flex items-center gap-2">
+                  <input
+                    id="isActive"
+                    type="checkbox"
+                    checked={isActive}
+                    onChange={(e) => setIsActive(e.target.checked)}
+                  />
+                  <span className="text-sm text-gray-600">
+                    {isActive ? "Mostrar" : "Ocultar"}
+                  </span>
+                </div>
+              </div>
+
+              <div className="mt-2 text-xs text-gray-400">
+                {isActive
+                  ? "Este producto se mostrará en el catálogo."
+                  : "Este producto quedará oculto en el catálogo."}
+              </div>
+            </div>
             <select
               value={categoryId}
               onChange={(e) => setCategoryId(e.target.value)}
@@ -1318,6 +1366,8 @@ const ProductsView: React.FC = () => {
             <form onSubmit={handleUpdateProduct} className="space-y-6">
               {/* Basic */}
               <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+
+
                 <div>
                   <label className="text-xs text-gray-500">Nombre</label>
                   <input
@@ -1433,6 +1483,36 @@ const ProductsView: React.FC = () => {
                     }
                     className="w-full p-2 border rounded"
                   />
+                </div>
+
+                <div className="border rounded-lg p-4 space-y-2 md:col-span-2">
+                  <div className="flex items-center justify-between">
+                    <label className="text-sm font-medium text-gray-700">
+                      Visible en catálogo
+                    </label>
+
+                    <div className="flex items-center gap-2">
+                      <input
+                        type="checkbox"
+                        checked={editingProduct.isActive ?? true}
+                        onChange={(e) =>
+                          setEditingProduct({
+                            ...editingProduct,
+                            isActive: e.target.checked,
+                          })
+                        }
+                      />
+                      <span className="text-sm text-gray-600">
+                        {(editingProduct.isActive ?? true) ? "Mostrar" : "Ocultar"}
+                      </span>
+                    </div>
+                  </div>
+
+                  <div className="text-xs text-gray-400">
+                    {(editingProduct.isActive ?? true)
+                      ? "Este producto se mostrará en el catálogo."
+                      : "Este producto quedará oculto en el catálogo."}
+                  </div>
                 </div>
 
                 <div className="md:col-span-2">

@@ -84,14 +84,15 @@ const CatalogView: React.FC = () => {
 
     const source = q ? allProducts : products;
 
-    if (!q) {
+    const visible = source.filter((p) => p.isActive !== false);
 
+    if (!q) {
       return activeCategoryId === "all"
-        ? source
-        : source.filter((p) => p.categoryId === activeCategoryId);
+        ? visible
+        : visible.filter((p) => p.categoryId === activeCategoryId);
     }
 
-    return source.filter((p) => {
+    return visible.filter((p) => {
       const catName = categoryNameById.get(p.categoryId) || "";
 
       const variantsText = (p.variants || [])
@@ -107,7 +108,6 @@ const CatalogView: React.FC = () => {
       return haystack.includes(q);
     });
   }, [search, allProducts, products, activeCategoryId, categoryNameById]);
-
 
   useEffect(() => {
     if (!categories.length) return;

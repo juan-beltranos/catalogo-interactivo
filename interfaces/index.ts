@@ -10,6 +10,7 @@ export interface Product {
     options: ProductOption[];
     variants: Variant[];
     videos?: VideoItem[];
+    isActive?: Boolean;
     discount?: {
         type: "percent" | "amount";
         value: number;
