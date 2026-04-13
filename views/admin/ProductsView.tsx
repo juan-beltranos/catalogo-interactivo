@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState, useRef } from "react";
+import React, { useEffect, useMemo, useState, useRef, useCallback } from "react";
 import {
   collection,
   addDoc,
@@ -35,6 +35,22 @@ import { cloudinaryConfig } from "@/lib/cloudinary";
 
 const PAGE_SIZE = 10;
 
+// ---------------------------------------------------------------------------
+// Caché de módulo — sobrevive navegación entre vistas sin recargar la app.
+// Se invalida cuando cambia el storeId.
+// ---------------------------------------------------------------------------
+type PageCache = {
+  storeId: string;
+  products: Product[];
+  firstDoc: QueryDocumentSnapshot<DocumentData> | null;
+  lastDoc: QueryDocumentSnapshot<DocumentData> | null;
+  hasNext: boolean;
+};
+let pageCache: PageCache | null = null;
+
+// Caché de allProducts para búsqueda (por storeId)
+const allProductsCache = new Map<string, Product[]>();
+
 const ProductsView: React.FC = () => {
   const { user } = useAuth();
 
@@ -42,7 +58,6 @@ const ProductsView: React.FC = () => {
   const [products, setProducts] = useState<Product[]>([]);
   const [categories, setCategories] = useState<{ id: string; name: string; order?: number }[]>([]);
   const [loading, setLoading] = useState(true);
-
 
   const [page, setPage] = useState(1);
   const [hasNext, setHasNext] = useState(false);
@@ -58,28 +73,26 @@ const ProductsView: React.FC = () => {
   // Create form
   const [name, setName] = useState("");
   const [description, setDescription] = useState("");
-  const [priceInput, setPriceInput] = useState(""); // COP input
+  const [priceInput, setPriceInput] = useState("");
   const [categoryId, setCategoryId] = useState("");
   const [imageFiles, setImageFiles] = useState<File[]>([]);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [sku, setSku] = useState("");
   const [hasDiscount, setHasDiscount] = useState(false);
   const [discountType, setDiscountType] = useState<"percent" | "amount">("percent");
-  const [discountValueInput, setDiscountValueInput] = useState(""); // "10" o "20000"
+  const [discountValueInput, setDiscountValueInput] = useState("");
   const [isActive, setIsActive] = useState(true);
 
   // Variants (create)
   const [createVariants, setCreateVariants] = useState<Variant[]>([]);
-  const [useVariants, setUseVariants] = useState(false);       // crear
-  const [editUseVariants, setEditUseVariants] = useState(false); // editar
+  const [useVariants, setUseVariants] = useState(false);
+  const [editUseVariants, setEditUseVariants] = useState(false);
 
   // Edit modal
   const [editSku, setEditSku] = useState("");
   const [editHasDiscount, setEditHasDiscount] = useState(false);
-  const [editDiscountType, setEditDiscountType] =
-    useState<"percent" | "amount">("percent");
+  const [editDiscountType, setEditDiscountType] = useState<"percent" | "amount">("percent");
   const [editDiscountValueInput, setEditDiscountValueInput] = useState("");
-
   const [editingProduct, setEditingProduct] = useState<Product | null>(null);
   const [editPriceInput, setEditPriceInput] = useState("");
 
@@ -93,21 +106,23 @@ const ProductsView: React.FC = () => {
     currentName: "",
   });
 
-  // SEARCH (cache local)
+  // SEARCH
   const [search, setSearch] = useState("");
   const [debouncedSearch, setDebouncedSearch] = useState("");
   const [searching, setSearching] = useState(false);
   const [searchResults, setSearchResults] = useState<Product[]>([]);
-
-  // cache de todos los productos
   const [allProducts, setAllProducts] = useState<Product[]>([]);
   const [allLoaded, setAllLoaded] = useState(false);
 
   const importJsonRef = useRef<HTMLInputElement | null>(null);
 
+  // Stable ref to prodsRef collection (avoids re-creating queries on every render)
+  const prodsRefRef = useRef<ReturnType<typeof collection> | null>(null);
+  const catsRefRef = useRef<ReturnType<typeof collection> | null>(null);
 
-
+  // ---------------------------------------------------------------------------
   // 1) storeId del usuario actual
+  // ---------------------------------------------------------------------------
   useEffect(() => {
     if (!user) return;
 
@@ -121,24 +136,55 @@ const ProductsView: React.FC = () => {
     fetchStore();
   }, [user]);
 
-  // 2) refs por tienda
+  // ---------------------------------------------------------------------------
+  // 2) refs por tienda (estables, guardadas en refs para no recrear callbacks)
+  // ---------------------------------------------------------------------------
   const catsRef = useMemo(() => {
     if (!storeId) return null;
-    return collection(db, "stores", storeId, "categories");
+    const ref = collection(db, "stores", storeId, "categories");
+    catsRefRef.current = ref;
+    return ref;
   }, [storeId]);
 
   const prodsRef = useMemo(() => {
     if (!storeId) return null;
-    return collection(db, "stores", storeId, "products");
+    const ref = collection(db, "stores", storeId, "products");
+    prodsRefRef.current = ref;
+    return ref;
   }, [storeId]);
 
-  // 3) listeners
+  // ---------------------------------------------------------------------------
+  // mapDocToProduct — puro, sin dependencias de estado
+  // ---------------------------------------------------------------------------
+  const mapDocToProduct = useCallback(
+    (d: QueryDocumentSnapshot<DocumentData>): Product => {
+      const data = d.data() as any;
+      return {
+        id: d.id,
+        name: data.name ?? "",
+        sku: data.sku ?? null,
+        discount: data.discount ?? null,
+        description: data.description ?? "",
+        price: Number(data.price ?? 0),
+        categoryId: data.categoryId ?? "",
+        images: (data.images ?? []) as ImageItem[],
+        videos: (data.videos ?? []) as VideoItem[],
+        options: (data.options ?? []) as ProductOption[],
+        variants: (data.variants ?? []) as Variant[],
+        isActive: data.isActive ?? true,
+      };
+    },
+    []
+  );
+
+  // ---------------------------------------------------------------------------
+  // 3) Listeners de categorías + carga inicial de productos
+  // ---------------------------------------------------------------------------
   useEffect(() => {
     if (!storeId || !catsRef || !prodsRef) return;
 
     const qCats = query(catsRef, orderBy("name", "asc"));
     const unsubCats = onSnapshot(qCats, (snap) => {
-      //@ts-ignore
       setCategories(
         snap.docs.map((d) => ({
           id: d.id,
@@ -148,29 +194,56 @@ const ProductsView: React.FC = () => {
       );
     });
 
-    setLoading(true);
-    loadFirstPage();
+    // Servir desde caché si el storeId coincide
+    if (pageCache && pageCache.storeId === storeId) {
+      setProducts(pageCache.products);
+      setHasNext(pageCache.hasNext);
+      setPageFirstDoc(pageCache.firstDoc);
+      setPageLastDoc(pageCache.lastDoc);
+      setLoading(false);
+    } else {
+      setLoading(true);
+      loadFirstPage();
+    }
+
+    // Sincronizar caché de allProducts si ya existe
+    const cached = allProductsCache.get(storeId);
+    if (cached) {
+      setAllProducts(cached);
+      setAllLoaded(true);
+    }
 
     return () => {
       unsubCats();
     };
-  }, [storeId, catsRef, prodsRef]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [storeId]);
 
+  // ---------------------------------------------------------------------------
+  // Debounce de búsqueda
+  // ---------------------------------------------------------------------------
   useEffect(() => {
     const t = setTimeout(() => setDebouncedSearch(search.trim().toLowerCase()), 350);
     return () => clearTimeout(t);
   }, [search]);
 
-
-  const loadAllProductsOnce = async () => {
-    if (!prodsRef) return;
-    if (allLoaded) return;
+  // ---------------------------------------------------------------------------
+  // loadAllProductsOnce — lazy, cacheado por storeId
+  // ---------------------------------------------------------------------------
+  const loadAllProductsOnce = useCallback(async () => {
+    if (!prodsRef || !storeId) return;
+    if (allProductsCache.has(storeId)) {
+      const cached = allProductsCache.get(storeId)!;
+      setAllProducts(cached);
+      setAllLoaded(true);
+      return;
+    }
 
     setSearching(true);
     try {
-      // Trae todo ordenado para que se vea “bonito” al filtrar
       const snap = await getDocs(query(prodsRef, orderBy("createdAt", "desc")));
       const all = snap.docs.map(mapDocToProduct);
+      allProductsCache.set(storeId, all);
       setAllProducts(all);
       setAllLoaded(true);
     } catch (e) {
@@ -179,51 +252,54 @@ const ProductsView: React.FC = () => {
     } finally {
       setSearching(false);
     }
-  };
+  }, [prodsRef, storeId, mapDocToProduct]);
 
-  const downloadJson = (data: any, filename: string) => {
-    const json = JSON.stringify(data, null, 2);
-    const blob = new Blob([json], { type: "application/json;charset=utf-8" });
-    const url = URL.createObjectURL(blob);
+  // ---------------------------------------------------------------------------
+  // reloadAllProducts — llama solo si el caché ya estaba cargado
+  // ---------------------------------------------------------------------------
+  const reloadAllProducts = useCallback(async () => {
+    if (!prodsRef || !storeId) return;
+    try {
+      const snap = await getDocs(query(prodsRef, orderBy("createdAt", "desc")));
+      const all = snap.docs.map(mapDocToProduct);
+      allProductsCache.set(storeId, all);
+      setAllProducts(all);
+      setAllLoaded(true);
+    } catch (e) {
+      console.error(e);
+    }
+  }, [prodsRef, storeId, mapDocToProduct]);
 
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = filename;
-    document.body.appendChild(a);
-    a.click();
-    a.remove();
-
-    URL.revokeObjectURL(url);
-  };
-
+  // ---------------------------------------------------------------------------
+  // normalize / filterLocal
+  // ---------------------------------------------------------------------------
   const normalize = (s: string) =>
     (s || "")
       .toLowerCase()
       .normalize("NFD")
-      .replace(/[\u0300-\u036f]/g, "") // quita acentos
+      .replace(/[\u0300-\u036f]/g, "")
       .trim();
 
-  const filterLocal = (termRaw: string) => {
-    const term = normalize(termRaw);
-    if (!term) {
-      setSearchResults([]);
-      return;
-    }
+  const filterLocal = useCallback(
+    (termRaw: string) => {
+      const term = normalize(termRaw);
+      if (!term) {
+        setSearchResults([]);
+        return;
+      }
+      const parts = term.split(/\s+/).filter(Boolean);
+      const filtered = allProducts.filter((p) => {
+        const hay = normalize(`${p.name ?? ""} ${p.sku ?? ""} ${p.description ?? ""}`);
+        return parts.every((w) => hay.includes(w));
+      });
+      setSearchResults(filtered);
+    },
+    [allProducts]
+  );
 
-    const parts = term.split(/\s+/).filter(Boolean);
-
-    const filtered = allProducts.filter((p) => {
-      const hay = normalize(
-        `${p.name ?? ""} ${p.sku ?? ""} ${p.description ?? ""}`
-      );
-
-      // AND: todas las palabras deben aparecer
-      return parts.every((w) => hay.includes(w));
-    });
-
-    setSearchResults(filtered);
-  };
-
+  // ---------------------------------------------------------------------------
+  // Efecto de búsqueda
+  // ---------------------------------------------------------------------------
   useEffect(() => {
     if (!storeId || !prodsRef) return;
 
@@ -232,21 +308,18 @@ const ProductsView: React.FC = () => {
         setSearchResults([]);
         return;
       }
-
-      // lazy load: solo la primera vez que el usuario busca
       if (!allLoaded) {
         await loadAllProductsOnce();
       }
-
-      // filtra con lo que haya en memoria
       filterLocal(debouncedSearch);
     };
 
     run();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [debouncedSearch, storeId, prodsRef, allLoaded]);
+  }, [debouncedSearch, storeId, prodsRef, allLoaded, loadAllProductsOnce, filterLocal]);
 
-  // --- Images upload helper ---
+  // ---------------------------------------------------------------------------
+  // uploadImages / uploadVideos
+  // ---------------------------------------------------------------------------
   const uploadImages = async (files: File[]): Promise<ImageItem[]> => {
     if (!storeId || !files.length) return [];
     if (uploading) return [];
@@ -298,15 +371,11 @@ const ProductsView: React.FC = () => {
 
   const uploadVideos = async (files: File[]): Promise<VideoItem[]> => {
     if (!storeId || !files.length) return [];
-
     const uploaded: VideoItem[] = [];
 
     for (const f of files) {
       const err = validateVideoFile(f);
-      if (err) {
-        alert(err);
-        continue;
-      }
+      if (err) { alert(err); continue; }
 
       const ext = (f.name.split(".").pop() || "mp4").toLowerCase();
       const filename = `${Date.now()}_${Math.random().toString(36).slice(2, 8)}.${ext}`;
@@ -325,6 +394,9 @@ const ProductsView: React.FC = () => {
     return uploaded;
   };
 
+  // ---------------------------------------------------------------------------
+  // resetCreateForm
+  // ---------------------------------------------------------------------------
   const resetCreateForm = () => {
     if (fileInputRef.current) fileInputRef.current.value = "";
     setName("");
@@ -342,33 +414,106 @@ const ProductsView: React.FC = () => {
     setIsActive(true);
   };
 
-  // --- CREATE ---
+  // ---------------------------------------------------------------------------
+  // loadPage — actualiza caché de módulo al terminar
+  // ---------------------------------------------------------------------------
+  const loadPage = useCallback(
+    async (mode: "first" | "next" | "prev", firstDoc?: QueryDocumentSnapshot<DocumentData> | null, lastDoc?: QueryDocumentSnapshot<DocumentData> | null) => {
+      if (!prodsRef || !storeId) return;
+
+      setLoadingPage(true);
+      try {
+        let qBase = query(prodsRef, orderBy("createdAt", "desc"));
+
+        if (mode === "next" && lastDoc) {
+          qBase = query(qBase, startAfter(lastDoc), limit(PAGE_SIZE + 1));
+        } else if (mode === "prev" && firstDoc) {
+          qBase = query(qBase, endBefore(firstDoc), limitToLast(PAGE_SIZE + 1));
+        } else {
+          qBase = query(qBase, limit(PAGE_SIZE + 1));
+        }
+
+        const snap = await getDocs(qBase);
+        const docs = snap.docs;
+
+        const nextExists = docs.length > PAGE_SIZE;
+        const pageDocs = nextExists ? docs.slice(0, PAGE_SIZE) : docs;
+        const pageProducts = pageDocs.map(mapDocToProduct);
+
+        const newFirstDoc = pageDocs[0] ?? null;
+        const newLastDoc = pageDocs[pageDocs.length - 1] ?? null;
+
+        setProducts(pageProducts);
+        setHasNext(nextExists);
+        setPageFirstDoc(newFirstDoc);
+        setPageLastDoc(newLastDoc);
+
+        // Actualizar caché de módulo
+        pageCache = {
+          storeId,
+          products: pageProducts,
+          firstDoc: newFirstDoc,
+          lastDoc: newLastDoc,
+          hasNext: nextExists,
+        };
+      } finally {
+        setLoadingPage(false);
+        setLoading(false);
+      }
+    },
+    [prodsRef, storeId, mapDocToProduct]
+  );
+
+  const loadFirstPage = useCallback(async () => {
+    setPage(1);
+    setHistory([]);
+    await loadPage("first");
+  }, [loadPage]);
+
+  const goNext = useCallback(async () => {
+    if (!hasNext || loadingPage) return;
+    if (pageFirstDoc) setHistory((h) => [...h, pageFirstDoc]);
+    setPage((p) => p + 1);
+    await loadPage("next", pageFirstDoc, pageLastDoc);
+  }, [hasNext, loadingPage, pageFirstDoc, pageLastDoc, loadPage]);
+
+  const goPrev = useCallback(async () => {
+    if (history.length === 0 || loadingPage) return;
+    setHistory((h) => h.slice(0, -1));
+    setPage((p) => Math.max(1, p - 1));
+    await loadPage("prev", pageFirstDoc, pageLastDoc);
+  }, [history, loadingPage, pageFirstDoc, pageLastDoc, loadPage]);
+
+  // ---------------------------------------------------------------------------
+  // CREATE
+  // ---------------------------------------------------------------------------
+  const discountValueNum = Number((discountValueInput || "").replace(/[^\d]/g, "")) || 0;
+  const basePrice = parseCOP(priceInput);
+
   const handleAddProduct = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!storeId || !prodsRef) return;
-    if (isSubmitting) return; // evita doble submit rápido
+    if (isSubmitting) return;
 
     const cleanName = name.trim();
-    const basePrice = parseCOP(priceInput);
-
-    if (!cleanName || !categoryId || !basePrice) return;
+    const bp = parseCOP(priceInput);
+    if (!cleanName || !categoryId || !bp) return;
 
     setIsSubmitting(true);
     try {
       const images = await uploadImages(imageFiles);
       const videos = await uploadVideos(videoFiles);
-
       const variants = useVariants ? (createVariants || []) : [];
-
       const cleanSku = sku.trim() || null;
 
       const discount =
         hasDiscount && discountValueNum > 0
           ? {
-            type: discountType, // "percent" | "amount"
-            value: discountType === "percent"
-              ? Math.min(100, Math.max(0, discountValueNum))
-              : Math.max(0, discountValueNum),
+            type: discountType,
+            value:
+              discountType === "percent"
+                ? Math.min(100, Math.max(0, discountValueNum))
+                : Math.max(0, discountValueNum),
           }
           : null;
 
@@ -376,7 +521,7 @@ const ProductsView: React.FC = () => {
         name: cleanName,
         sku: cleanSku,
         description: description.trim(),
-        price: basePrice,
+        price: bp,
         discount,
         categoryId,
         images,
@@ -401,19 +546,9 @@ const ProductsView: React.FC = () => {
     }
   };
 
-  const reloadAllProducts = async () => {
-    if (!prodsRef) return;
-    setSearching(true);
-    try {
-      const snap = await getDocs(query(prodsRef, orderBy("createdAt", "desc")));
-      setAllProducts(snap.docs.map(mapDocToProduct));
-      setAllLoaded(true);
-    } finally {
-      setSearching(false);
-    }
-  };
-
-  // --- DELETE product (incluye borrar imágenes en Storage) ---
+  // ---------------------------------------------------------------------------
+  // DELETE
+  // ---------------------------------------------------------------------------
   const handleDeleteProduct = async (prod: Product) => {
     if (!storeId) return;
     if (!window.confirm("¿Eliminar producto?")) return;
@@ -428,12 +563,13 @@ const ProductsView: React.FC = () => {
     }
   };
 
-  // --- OPEN EDIT ---
+  // ---------------------------------------------------------------------------
+  // OPEN EDIT
+  // ---------------------------------------------------------------------------
   const openEdit = (p: Product) => {
     setEditingProduct(p);
     setEditPriceInput(String(p.price));
     setEditUseVariants((p.variants?.length ?? 0) > 0);
-
     setEditSku(p.sku ?? "");
 
     if (p.discount) {
@@ -447,14 +583,16 @@ const ProductsView: React.FC = () => {
     }
   };
 
+  // ---------------------------------------------------------------------------
+  // UPDATE
+  // ---------------------------------------------------------------------------
   const handleUpdateProduct = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!storeId || !editingProduct) return;
 
     setIsSubmitting(true);
     try {
-      const basePrice = parseCOP(editPriceInput);
-
+      const bp = parseCOP(editPriceInput);
       const prodRef = doc(db, "stores", storeId, "products", editingProduct.id);
       const cleanSku = editSku.trim() || null;
 
@@ -473,7 +611,7 @@ const ProductsView: React.FC = () => {
         name: editingProduct.name.trim(),
         sku: cleanSku,
         description: (editingProduct.description ?? "").trim(),
-        price: basePrice,
+        price: bp,
         discount,
         categoryId: editingProduct.categoryId,
         options: [],
@@ -495,27 +633,21 @@ const ProductsView: React.FC = () => {
     }
   };
 
-  // --- ADD images in edit modal (append) ---
+  // ---------------------------------------------------------------------------
+  // Images / Videos en edit modal
+  // ---------------------------------------------------------------------------
   const handleAddMoreImagesToEdit = async (files: FileList | null) => {
     if (!files || !editingProduct || !storeId) return;
-
-    const list = Array.from(files);
-    const uploaded = await uploadImages(list);
-
+    const uploaded = await uploadImages(Array.from(files));
     const nextImages = [...(editingProduct.images || []), ...uploaded];
 
     await updateDoc(doc(db, "stores", storeId, "products", editingProduct.id), {
       images: nextImages,
       updatedAt: serverTimestamp(),
     });
-
-    setEditingProduct({
-      ...editingProduct,
-      images: nextImages,
-    });
+    setEditingProduct({ ...editingProduct, images: nextImages });
   };
 
-  // --- REMOVE one image from edit modal (and storage) ---
   const removeImageFromEdit = async (index: number) => {
     if (!editingProduct || !storeId) return;
     if (!window.confirm("¿Eliminar esta imagen?")) return;
@@ -527,15 +659,12 @@ const ProductsView: React.FC = () => {
       images: next,
       updatedAt: serverTimestamp(),
     });
-
     setEditingProduct({ ...editingProduct, images: next });
   };
 
   const handleAddMoreVideosToEdit = async (files: FileList | null) => {
     if (!files || !editingProduct) return;
-    const list = Array.from(files);
-    const uploaded = await uploadVideos(list);
-
+    const uploaded = await uploadVideos(Array.from(files));
     setEditingProduct({
       ...editingProduct,
       videos: [...((editingProduct as any).videos || []), ...uploaded],
@@ -544,11 +673,9 @@ const ProductsView: React.FC = () => {
 
   const removeVideoFromEdit = async (index: number) => {
     if (!editingProduct) return;
-
     const vids = (((editingProduct as any).videos || []) as VideoItem[]);
     const vid = vids[index];
     if (!vid) return;
-
     if (!window.confirm("¿Eliminar este video?")) return;
 
     try {
@@ -559,101 +686,60 @@ const ProductsView: React.FC = () => {
 
     const next = [...vids];
     next.splice(index, 1);
-
     setEditingProduct({ ...(editingProduct as any), videos: next });
   };
 
-  const mapDocToProduct = (d: QueryDocumentSnapshot<DocumentData>) => {
-    const data = d.data() as any;
+  // ---------------------------------------------------------------------------
+  // toggleProductStatus — optimista: actualiza estado local antes del write
+  // ---------------------------------------------------------------------------
+  const toggleProductStatus = async (prod: Product) => {
+    if (!storeId) return;
 
-    return {
-      id: d.id,
-      name: data.name ?? "",
-      sku: data.sku ?? null,
-      discount: data.discount ?? null,
-      description: data.description ?? "",
-      price: Number(data.price ?? 0),
-      categoryId: data.categoryId ?? "",
-      images: (data.images ?? []) as ImageItem[],
-      videos: (data.videos ?? []) as VideoItem[],
-      options: (data.options ?? []) as ProductOption[],
-      variants: (data.variants ?? []) as Variant[],
-      isActive: data.isActive ?? true,
-    } satisfies Product;
-  };
+    const newStatus = !prod.isActive;
 
-  const loadPage = async (mode: "first" | "next" | "prev") => {
-    if (!prodsRef) return;
+    // Actualización optimista
+    setProducts((prev) =>
+      prev.map((p) => (p.id === prod.id ? { ...p, isActive: newStatus } : p))
+    );
+    if (allLoaded) {
+      const updated = allProductsCache.get(storeId)?.map((p) =>
+        p.id === prod.id ? { ...p, isActive: newStatus } : p
+      ) ?? [];
+      allProductsCache.set(storeId, updated);
+      setAllProducts(updated);
+    }
+    if (pageCache?.storeId === storeId) {
+      pageCache.products = pageCache.products.map((p) =>
+        p.id === prod.id ? { ...p, isActive: newStatus } : p
+      );
+    }
 
-    setLoadingPage(true);
     try {
-      let qBase = query(prodsRef, orderBy("createdAt", "desc"));
-
-      if (mode === "next" && pageLastDoc) {
-        qBase = query(qBase, startAfter(pageLastDoc));
-      }
-
-      if (mode === "prev" && pageFirstDoc) {
-        // vuelve hacia atrás: trae los últimos 31 antes del firstDoc actual
-        qBase = query(qBase, endBefore(pageFirstDoc), limitToLast(PAGE_SIZE + 1));
-      } else {
-        qBase = query(qBase, limit(PAGE_SIZE + 1));
-      }
-
-      const snap = await getDocs(qBase);
-      const docs = snap.docs;
-
-      const nextExists = docs.length > PAGE_SIZE;
-      const pageDocs = nextExists ? docs.slice(0, PAGE_SIZE) : docs;
-
-      setProducts(pageDocs.map(mapDocToProduct));
-      setHasNext(nextExists);
-
-      setPageFirstDoc(pageDocs[0] ?? null);
-      setPageLastDoc(pageDocs[pageDocs.length - 1] ?? null);
-    } finally {
-      setLoadingPage(false);
-      setLoading(false);
+      await updateDoc(doc(db, "stores", storeId, "products", prod.id), {
+        isActive: newStatus,
+        updatedAt: serverTimestamp(),
+      });
+    } catch (err) {
+      console.error(err);
+      alert("Error cambiando estado del producto");
+      // Revertir si falla
+      setProducts((prev) =>
+        prev.map((p) => (p.id === prod.id ? { ...p, isActive: prod.isActive } : p))
+      );
     }
   };
 
-  const loadFirstPage = async () => {
-    setPage(1);
-    setHistory([]);
-    await loadPage("first");
-  };
-
-  const goNext = async () => {
-    if (!hasNext || loadingPage) return;
-    if (pageFirstDoc) setHistory((h) => [...h, pageFirstDoc]);
-    setPage((p) => p + 1);
-    await loadPage("next");
-  };
-
-  const goPrev = async () => {
-    if (history.length === 0 || loadingPage) return;
-    setHistory((h) => h.slice(0, -1));
-    setPage((p) => Math.max(1, p - 1));
-    await loadPage("prev");
-  };
-
-  const basePrice = parseCOP(priceInput);
-
-  const discountValueNum = Number((discountValueInput || "").replace(/[^\d]/g, "")) || 0;
-
+  // ---------------------------------------------------------------------------
+  // Descuentos — memos
+  // ---------------------------------------------------------------------------
   const finalPrice = useMemo(() => {
     if (!hasDiscount) return basePrice;
-
     if (!basePrice) return 0;
-
     if (discountType === "percent") {
       const pct = Math.min(100, Math.max(0, discountValueNum));
       return Math.max(0, Math.round(basePrice * (1 - pct / 100)));
     }
-
-    // amount
-    const amt = Math.max(0, discountValueNum);
-    return Math.max(0, basePrice - amt);
+    return Math.max(0, basePrice - Math.max(0, discountValueNum));
   }, [hasDiscount, discountType, discountValueNum, basePrice]);
 
   const savings = useMemo(() => {
@@ -662,21 +748,17 @@ const ProductsView: React.FC = () => {
   }, [hasDiscount, basePrice, finalPrice]);
 
   const editBasePrice = parseCOP(editPriceInput);
-
   const editDiscountValueNum =
     Number((editDiscountValueInput || "").replace(/[^\d]/g, "")) || 0;
 
   const editFinalPrice = useMemo(() => {
     if (!editHasDiscount) return editBasePrice;
     if (!editBasePrice) return 0;
-
     if (editDiscountType === "percent") {
       const pct = Math.min(100, Math.max(0, editDiscountValueNum));
       return Math.max(0, Math.round(editBasePrice * (1 - pct / 100)));
     }
-
-    const amt = Math.max(0, editDiscountValueNum);
-    return Math.max(0, editBasePrice - amt);
+    return Math.max(0, editBasePrice - Math.max(0, editDiscountValueNum));
   }, [editHasDiscount, editDiscountType, editDiscountValueNum, editBasePrice]);
 
   const editSavings = useMemo(() => {
@@ -684,12 +766,9 @@ const ProductsView: React.FC = () => {
     return Math.max(0, editBasePrice - editFinalPrice);
   }, [editHasDiscount, editBasePrice, editFinalPrice]);
 
-
-  if (!storeId) return <div className="p-8 text-center">Buscando configuración de tienda...</div>;
-
-  const listToRender = search ? searchResults : products;
-
-
+  // ---------------------------------------------------------------------------
+  // Import helpers (sin cambios de lógica, solo movidos al final)
+  // ---------------------------------------------------------------------------
   const normalizeText = (value: any) =>
     String(value ?? "")
       .trim()
@@ -699,48 +778,31 @@ const ProductsView: React.FC = () => {
 
   const parseNumberSafe = (value: any) => {
     if (typeof value === "number") return Number.isFinite(value) ? value : 0;
-
     const raw = String(value ?? "").trim();
     if (!raw) return 0;
-
-    // soporta 250000, 250.000, 250,000, $250.000
     const cleaned = raw
       .replace(/[^\d.,-]/g, "")
       .replace(/\.(?=\d{3}\b)/g, "")
       .replace(",", ".");
-
     const num = Number(cleaned);
     return Number.isFinite(num) ? num : 0;
   };
 
-  const normalizeHtml = (value: any) => {
-    const str = String(value ?? "").trim();
-    if (!str) return "";
-    const looksLikeHtml = /<\/?[a-z][\s\S]*>/i.test(str);
-    return looksLikeHtml ? str : `<p>${str}</p>`;
-  };
-
-  const buildDiscount = (price: number, originalRaw: any) => {
-    const originalPrice = parseNumberSafe(originalRaw);
-
-    if (!originalPrice || originalPrice <= price) return null;
-
-    return {
-      type: "amount" as const,
-      value: originalPrice - price,
-    };
-  };
   const htmlToPlainText = (value: any) => {
     const str = String(value ?? "").trim();
     if (!str) return "";
-
     const temp = document.createElement("div");
     temp.innerHTML = str;
-
     return (temp.textContent || temp.innerText || "")
       .replace(/\n\s*\n/g, "\n")
       .replace(/[ \t]+/g, " ")
       .trim();
+  };
+
+  const buildDiscount = (price: number, originalRaw: any) => {
+    const originalPrice = parseNumberSafe(originalRaw);
+    if (!originalPrice || originalPrice <= price) return null;
+    return { type: "amount" as const, value: originalPrice - price };
   };
 
   const getOrCreateCategoryId = async (
@@ -748,26 +810,19 @@ const ProductsView: React.FC = () => {
     categoryMap: Map<string, string>
   ) => {
     if (!storeId || !catsRef) return "";
-
     const categoryName = String(categoryNameRaw || "").trim();
     if (!categoryName) return "";
 
     const normalizedName = normalizeText(categoryName);
-
-    // 1) revisar cache local del import actual
     const cachedId = categoryMap.get(normalizedName);
     if (cachedId) return cachedId;
 
-    // 2) revisar categorías ya cargadas en estado
-    const existing = categories.find(
-      (cat) => normalizeText(cat.name) === normalizedName
-    );
+    const existing = categories.find((cat) => normalizeText(cat.name) === normalizedName);
     if (existing) {
       categoryMap.set(normalizedName, existing.id);
       return existing.id;
     }
 
-    // 3) revisar Firestore por si ya existe pero el estado aún no se refrescó
     const snap = await getDocs(query(catsRef, orderBy("name", "asc")));
     const dbCategories = snap.docs.map((d) => ({
       id: d.id,
@@ -778,7 +833,6 @@ const ProductsView: React.FC = () => {
     const existingInDb = dbCategories.find(
       (cat) => normalizeText(cat.name) === normalizedName
     );
-
     if (existingInDb) {
       categoryMap.set(normalizedName, existingInDb.id);
       return existingInDb.id;
@@ -796,8 +850,20 @@ const ProductsView: React.FC = () => {
     });
 
     categoryMap.set(normalizedName, newRef.id);
-
     return newRef.id;
+  };
+
+  const downloadJson = (data: any, filename: string) => {
+    const json = JSON.stringify(data, null, 2);
+    const blob = new Blob([json], { type: "application/json;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
   };
 
   const handleImportJsonFile = async (file: File) => {
@@ -807,23 +873,17 @@ const ProductsView: React.FC = () => {
     }
 
     setIsSubmitting(true);
-
     try {
       const text = await file.text();
-
       let parsed: any;
-      try {
-        parsed = JSON.parse(text);
-      } catch {
+      try { parsed = JSON.parse(text); } catch {
         alert("El archivo no es un JSON válido.");
         return;
       }
 
       const items: ImportedJsonProduct[] = Array.isArray(parsed)
         ? parsed
-        : Array.isArray(parsed?.products)
-          ? parsed.products
-          : [];
+        : Array.isArray(parsed?.products) ? parsed.products : [];
 
       if (!items.length) {
         alert("No encontré productos. El JSON debe ser un array o { products: [] }");
@@ -832,35 +892,24 @@ const ProductsView: React.FC = () => {
 
       let imported = 0;
       let skipped = 0;
-
       const categoryMap = new Map<string, string>();
 
       for (const item of items) {
-        const name = String(item.name ?? "").trim();
+        const itemName = String(item.name ?? "").trim();
         const price = parseNumberSafe(item.price);
 
-        if (!name || price <= 0) {
-          skipped++;
-          continue;
-        }
+        if (!itemName || price <= 0) { skipped++; continue; }
 
-        const categoryId = await getOrCreateCategoryId(
-          item.category ?? "",
-          categoryMap
-        );
-
-        const discount = buildDiscount(
-          price,
-          item.originalPrice ?? item.oldPrice ?? item.compareAtPrice
-        );
+        const catId = await getOrCreateCategoryId(item.category ?? "", categoryMap);
+        const discount = buildDiscount(price, item.originalPrice ?? item.oldPrice ?? item.compareAtPrice);
 
         await addDoc(prodsRef, {
-          name,
+          name: itemName,
           sku: null,
           description: htmlToPlainText(item.description),
           price,
           discount,
-          categoryId,
+          categoryId: catId,
           images: [],
           videos: [],
           options: [],
@@ -876,10 +925,7 @@ const ProductsView: React.FC = () => {
       await loadFirstPage();
       if (allLoaded) await reloadAllProducts();
 
-      if (importJsonRef.current) {
-        importJsonRef.current.value = "";
-      }
-
+      if (importJsonRef.current) importJsonRef.current.value = "";
       alert(`Importación completada. Importados: ${imported}. Omitidos: ${skipped}.`);
     } catch (error) {
       console.error(error);
@@ -891,7 +937,6 @@ const ProductsView: React.FC = () => {
 
   const handleDeleteTodayDocs = async () => {
     if (!storeId) return;
-
     const confirm = window.confirm(
       "⚠️ Esto borrará TODOS los productos y categorías creados hoy. ¿Continuar?"
     );
@@ -901,72 +946,43 @@ const ProductsView: React.FC = () => {
       const start = new Date("2026-04-04T00:00:00");
       const end = new Date("2026-04-04T23:59:59");
 
-      // 🔥 PRODUCTS
-      const prodsRef = collection(db, "stores", storeId, "products");
+      const prodsCol = collection(db, "stores", storeId, "products");
+      const catsCol = collection(db, "stores", storeId, "categories");
 
-      const qProducts = query(
-        prodsRef,
-        where("createdAt", ">=", start),
-        where("createdAt", "<=", end)
-      );
+      const [productsSnap, catsSnap] = await Promise.all([
+        getDocs(query(prodsCol, where("createdAt", ">=", start), where("createdAt", "<=", end))),
+        getDocs(query(catsCol, where("createdAt", ">=", start), where("createdAt", "<=", end))),
+      ]);
 
-      const productsSnap = await getDocs(qProducts);
+      await Promise.all([
+        ...productsSnap.docs.map((d) => deleteDoc(d.ref)),
+        ...catsSnap.docs.map((d) => deleteDoc(d.ref)),
+      ]);
 
-      for (const docSnap of productsSnap.docs) {
-        await deleteDoc(docSnap.ref);
-      }
-
-      // 🔥 CATEGORIES
-      const catsRef = collection(db, "stores", storeId, "categories");
-
-      const qCategories = query(
-        catsRef,
-        where("createdAt", ">=", start),
-        where("createdAt", "<=", end)
-      );
-
-      const catsSnap = await getDocs(qCategories);
-
-      for (const docSnap of catsSnap.docs) {
-        await deleteDoc(docSnap.ref);
-      }
-
-      alert(
-        `✅ Eliminados:\nProductos: ${productsSnap.size}\nCategorías: ${catsSnap.size}`
-      );
-
+      alert(`✅ Eliminados:\nProductos: ${productsSnap.size}\nCategorías: ${catsSnap.size}`);
       await loadFirstPage();
-
     } catch (err) {
       console.error(err);
       alert("❌ Error eliminando documentos");
     }
   };
 
-  const toggleProductStatus = async (prod: Product) => {
-    if (!storeId) return;
+  // ---------------------------------------------------------------------------
+  // Guard
+  // ---------------------------------------------------------------------------
+  if (!storeId) return <div className="p-8 text-center">Buscando configuración de tienda...</div>;
 
-    try {
-      await updateDoc(doc(db, "stores", storeId, "products", prod.id), {
-        isActive: !prod.isActive,
-        updatedAt: serverTimestamp(),
-      });
+  const listToRender = search ? searchResults : products;
 
-      await loadFirstPage();
-      if (allLoaded) await reloadAllProducts();
-    } catch (err) {
-      console.error(err);
-      alert("Error cambiando estado del producto");
-    }
-  };
-
+  // ---------------------------------------------------------------------------
+  // RENDER
+  // ---------------------------------------------------------------------------
   return (
     <div className="space-y-8">
       <div className="flex justify-between items-center">
         <h1 className="text-2xl font-bold">Productos</h1>
       </div>
 
-      {/* {storeId ? <ImportProductsExcel storeId={storeId} /> : null} */}
       <div className="flex items-center gap-2">
         <input
           ref={importJsonRef}
@@ -978,23 +994,7 @@ const ProductsView: React.FC = () => {
             if (file) handleImportJsonFile(file);
           }}
         />
-        {/* <button
-          onClick={handleDeleteTodayDocs}
-          className="px-4 py-2 bg-red-600 text-white rounded-lg hover:bg-red-700"
-        >
-          🗑️ Borrar documentos de hoy
-        </button>
-
-        <button
-          type="button"
-          onClick={() => importJsonRef.current?.click()}
-          disabled={!storeId || isSubmitting}
-          className="px-4 py-2 rounded-lg bg-emerald-600 text-white font-medium hover:bg-emerald-700 disabled:opacity-50"
-        >
-          Importar JSON
-        </button> */}
       </div>
-
 
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
         {/* CREATE */}
@@ -1019,7 +1019,6 @@ const ProductsView: React.FC = () => {
               rows={3}
             />
 
-            {/* Precio COP */}
             <input
               type="text"
               placeholder="Precio (COP) ej: 250000 o 250.000"
@@ -1032,10 +1031,7 @@ const ProductsView: React.FC = () => {
             {/* Descuento */}
             <div className="border rounded-lg p-3">
               <div className="flex items-center justify-between">
-                <label className="text-sm text-gray-700 font-medium">
-                  Descuento
-                </label>
-
+                <label className="text-sm text-gray-700 font-medium">Descuento</label>
                 <div className="flex items-center gap-2">
                   <input
                     id="hasDiscount"
@@ -1044,15 +1040,10 @@ const ProductsView: React.FC = () => {
                     onChange={(e) => {
                       const checked = e.target.checked;
                       setHasDiscount(checked);
-                      if (!checked) {
-                        setDiscountValueInput("");
-                        setDiscountType("percent");
-                      }
+                      if (!checked) { setDiscountValueInput(""); setDiscountType("percent"); }
                     }}
                   />
-                  <label htmlFor="hasDiscount" className="text-sm text-gray-600">
-                    Activar
-                  </label>
+                  <label htmlFor="hasDiscount" className="text-sm text-gray-600">Activar</label>
                 </div>
               </div>
 
@@ -1066,7 +1057,6 @@ const ProductsView: React.FC = () => {
                     <option value="percent">% Porcentaje</option>
                     <option value="amount">$ Valor (COP)</option>
                   </select>
-
                   <input
                     type="text"
                     placeholder={discountType === "percent" ? "Ej: 10" : "Ej: 20000"}
@@ -1074,18 +1064,13 @@ const ProductsView: React.FC = () => {
                     onChange={(e) => setDiscountValueInput(e.target.value)}
                     className="w-full p-2 border rounded sm:col-span-2"
                   />
-
                   <div className="sm:col-span-3 text-xs text-gray-500">
                     {basePrice ? (
                       <>
-                        <div>
-                          Precio original: <b>{formatCOP(basePrice)}</b>
-                        </div>
+                        <div>Precio original: <b>{formatCOP(basePrice)}</b></div>
                         <div>
                           Precio final: <b className="text-indigo-700">{formatCOP(finalPrice)}</b>
-                          {savings > 0 ? (
-                            <> — Ahorro: <b>{formatCOP(savings)}</b></>
-                          ) : null}
+                          {savings > 0 ? <> — Ahorro: <b>{formatCOP(savings)}</b></> : null}
                         </div>
                       </>
                     ) : (
@@ -1100,7 +1085,6 @@ const ProductsView: React.FC = () => {
               )}
             </div>
 
-
             <input
               type="text"
               placeholder="Código / SKU (opcional)"
@@ -1114,7 +1098,6 @@ const ProductsView: React.FC = () => {
                 <label htmlFor="isActive" className="text-sm font-medium text-gray-700">
                   Visible en catálogo
                 </label>
-
                 <div className="flex items-center gap-2">
                   <input
                     id="isActive"
@@ -1122,18 +1105,16 @@ const ProductsView: React.FC = () => {
                     checked={isActive}
                     onChange={(e) => setIsActive(e.target.checked)}
                   />
-                  <span className="text-sm text-gray-600">
-                    {isActive ? "Mostrar" : "Ocultar"}
-                  </span>
+                  <span className="text-sm text-gray-600">{isActive ? "Mostrar" : "Ocultar"}</span>
                 </div>
               </div>
-
               <div className="mt-2 text-xs text-gray-400">
                 {isActive
                   ? "Este producto se mostrará en el catálogo."
                   : "Este producto quedará oculto en el catálogo."}
               </div>
             </div>
+
             <select
               value={categoryId}
               onChange={(e) => setCategoryId(e.target.value)}
@@ -1142,16 +1123,11 @@ const ProductsView: React.FC = () => {
             >
               <option value="">Categoría</option>
               {categories.map((cat) => (
-                <option key={cat.id} value={cat.id}>
-                  {cat.name}
-                </option>
+                <option key={cat.id} value={cat.id}>{cat.name}</option>
               ))}
             </select>
 
-            {/* Imágenes múltiples */}
-            <p className="text-[11px] text-gray-400">
-              + Agregar imágenes
-            </p>
+            <p className="text-[11px] text-gray-400">+ Agregar imágenes</p>
             <input
               ref={fileInputRef}
               type="file"
@@ -1160,11 +1136,7 @@ const ProductsView: React.FC = () => {
               className="w-full text-xs"
             />
 
-            <p className="text-[11px] text-gray-400">
-              Máx {MAX_VIDEO_MB}MB por video.
-            </p>
-
-            {/* Videos múltiples */}
+            <p className="text-[11px] text-gray-400">Máx {MAX_VIDEO_MB}MB por video.</p>
             <input
               type="file"
               multiple
@@ -1173,7 +1145,6 @@ const ProductsView: React.FC = () => {
               className="w-full text-xs"
             />
 
-            {/* Variantes toggle */}
             <div className="flex items-center gap-2">
               <input
                 id="useVariants"
@@ -1191,10 +1162,7 @@ const ProductsView: React.FC = () => {
             </div>
 
             {useVariants ? (
-              <VariantsEditor
-                variants={createVariants}
-                onChange={setCreateVariants}
-              />
+              <VariantsEditor variants={createVariants} onChange={setCreateVariants} />
             ) : null}
 
             <button
@@ -1229,7 +1197,6 @@ const ProductsView: React.FC = () => {
             </div>
 
             {search ? (
-
               <div className="mt-2 text-xs text-gray-500">
                 {searching
                   ? "Cargando productos para búsqueda..."
@@ -1255,7 +1222,6 @@ const ProductsView: React.FC = () => {
 
                 <tbody className="divide-y">
                   {listToRender.map((prod) => {
-
                     const hasVariants = (prod.variants?.length ?? 0) > 0;
                     const displayPrice = hasVariants
                       ? `Desde ${formatCOP(Math.min(...prod.variants.map((v) => v.price || 0)))}`
@@ -1265,7 +1231,6 @@ const ProductsView: React.FC = () => {
                       <tr key={prod.id} className="text-sm">
                         <td className="px-4 sm:px-6 py-4 font-medium">
                           <div className="flex items-center gap-3">
-                            {/* imagen */}
                             {prod.images?.[0]?.url ? (
                               <img
                                 src={cldImg(prod.images[0].url, { w: 80, h: 80, crop: "fill" })}
@@ -1277,16 +1242,11 @@ const ProductsView: React.FC = () => {
                               <div className="w-10 h-10 rounded bg-gray-100 border shrink-0" />
                             )}
 
-                            {/* texto */}
                             <div className="min-w-0 flex-1">
-                              <div className="font-semibold text-gray-900 truncate">
-                                {prod.name}
-                              </div>
-
+                              <div className="font-semibold text-gray-900 truncate">{prod.name}</div>
                               <div className="text-xs text-gray-400 line-clamp-2 sm:line-clamp-1">
                                 {prod.description || ""}
                               </div>
-
                               {(prod.videos?.length ?? 0) > 0 ? (
                                 <div className="mt-1 text-[10px] text-gray-400">
                                   <i className="fa-solid fa-video mr-1" />
@@ -1337,6 +1297,7 @@ const ProductsView: React.FC = () => {
                   ) : null}
                 </tbody>
               </table>
+
               {!search ? (
                 <Paginator
                   page={page}
@@ -1358,24 +1319,17 @@ const ProductsView: React.FC = () => {
           <div className="bg-white p-6 rounded-2xl w-full max-w-3xl max-h-[85vh] overflow-auto">
             <div className="flex items-center justify-between mb-4">
               <h3 className="text-xl font-bold">Editar Producto</h3>
-              <button onClick={() => setEditingProduct(null)} className="text-gray-500">
-                ✕
-              </button>
+              <button onClick={() => setEditingProduct(null)} className="text-gray-500">✕</button>
             </div>
 
             <form onSubmit={handleUpdateProduct} className="space-y-6">
-              {/* Basic */}
               <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-
-
                 <div>
                   <label className="text-xs text-gray-500">Nombre</label>
                   <input
                     type="text"
                     value={editingProduct.name}
-                    onChange={(e) =>
-                      setEditingProduct({ ...editingProduct, name: e.target.value })
-                    }
+                    onChange={(e) => setEditingProduct({ ...editingProduct, name: e.target.value })}
                     className="w-full p-2 border rounded"
                   />
                 </div>
@@ -1392,7 +1346,7 @@ const ProductsView: React.FC = () => {
                     Preview: {formatCOP(parseCOP(editPriceInput))}
                   </div>
                 </div>
-                {/* SKU */}
+
                 <div>
                   <label className="text-xs text-gray-500">Código / SKU</label>
                   <input
@@ -1404,13 +1358,9 @@ const ProductsView: React.FC = () => {
                   />
                 </div>
 
-                {/* Descuento */}
                 <div className="border rounded-lg p-4 space-y-3">
                   <div className="flex items-center justify-between">
-                    <label className="text-sm font-medium text-gray-700">
-                      Descuento
-                    </label>
-
+                    <label className="text-sm font-medium text-gray-700">Descuento</label>
                     <div className="flex items-center gap-2">
                       <input
                         type="checkbox"
@@ -1418,10 +1368,7 @@ const ProductsView: React.FC = () => {
                         onChange={(e) => {
                           const checked = e.target.checked;
                           setEditHasDiscount(checked);
-                          if (!checked) {
-                            setEditDiscountValueInput("");
-                            setEditDiscountType("percent");
-                          }
+                          if (!checked) { setEditDiscountValueInput(""); setEditDiscountType("percent"); }
                         }}
                       />
                       <span className="text-sm text-gray-600">Activar</span>
@@ -1438,7 +1385,6 @@ const ProductsView: React.FC = () => {
                         <option value="percent">% Porcentaje</option>
                         <option value="amount">$ Valor (COP)</option>
                       </select>
-
                       <input
                         type="text"
                         value={editDiscountValueInput}
@@ -1446,19 +1392,13 @@ const ProductsView: React.FC = () => {
                         placeholder={editDiscountType === "percent" ? "Ej: 10" : "Ej: 20000"}
                         className="p-2 border rounded sm:col-span-2"
                       />
-
                       <div className="sm:col-span-3 text-xs text-gray-500">
                         {editBasePrice ? (
                           <>
+                            <div>Precio original: <b>{formatCOP(editBasePrice)}</b></div>
                             <div>
-                              Precio original: <b>{formatCOP(editBasePrice)}</b>
-                            </div>
-                            <div>
-                              Precio final:{" "}
-                              <b className="text-indigo-700">{formatCOP(editFinalPrice)}</b>
-                              {editSavings > 0 && (
-                                <> — Ahorro: <b>{formatCOP(editSavings)}</b></>
-                              )}
+                              Precio final: <b className="text-indigo-700">{formatCOP(editFinalPrice)}</b>
+                              {editSavings > 0 && <> — Ahorro: <b>{formatCOP(editSavings)}</b></>}
                             </div>
                           </>
                         ) : (
@@ -1467,9 +1407,7 @@ const ProductsView: React.FC = () => {
                       </div>
                     </div>
                   ) : (
-                    <div className="text-xs text-gray-400">
-                      Sin descuento, se mostrará el precio normal.
-                    </div>
+                    <div className="text-xs text-gray-400">Sin descuento, se mostrará el precio normal.</div>
                   )}
                 </div>
 
@@ -1478,36 +1416,25 @@ const ProductsView: React.FC = () => {
                   <textarea
                     rows={3}
                     value={editingProduct.description || ""}
-                    onChange={(e) =>
-                      setEditingProduct({ ...editingProduct, description: e.target.value })
-                    }
+                    onChange={(e) => setEditingProduct({ ...editingProduct, description: e.target.value })}
                     className="w-full p-2 border rounded"
                   />
                 </div>
 
                 <div className="border rounded-lg p-4 space-y-2 md:col-span-2">
                   <div className="flex items-center justify-between">
-                    <label className="text-sm font-medium text-gray-700">
-                      Visible en catálogo
-                    </label>
-
+                    <label className="text-sm font-medium text-gray-700">Visible en catálogo</label>
                     <div className="flex items-center gap-2">
                       <input
                         type="checkbox"
                         checked={editingProduct.isActive ?? true}
-                        onChange={(e) =>
-                          setEditingProduct({
-                            ...editingProduct,
-                            isActive: e.target.checked,
-                          })
-                        }
+                        onChange={(e) => setEditingProduct({ ...editingProduct, isActive: e.target.checked })}
                       />
                       <span className="text-sm text-gray-600">
                         {(editingProduct.isActive ?? true) ? "Mostrar" : "Ocultar"}
                       </span>
                     </div>
                   </div>
-
                   <div className="text-xs text-gray-400">
                     {(editingProduct.isActive ?? true)
                       ? "Este producto se mostrará en el catálogo."
@@ -1519,16 +1446,12 @@ const ProductsView: React.FC = () => {
                   <label className="text-xs text-gray-500">Categoría</label>
                   <select
                     value={editingProduct.categoryId}
-                    onChange={(e) =>
-                      setEditingProduct({ ...editingProduct, categoryId: e.target.value })
-                    }
+                    onChange={(e) => setEditingProduct({ ...editingProduct, categoryId: e.target.value })}
                     className="w-full p-2 border rounded"
                   >
                     <option value="">Categoría</option>
                     {categories.map((cat) => (
-                      <option key={cat.id} value={cat.id}>
-                        {cat.name}
-                      </option>
+                      <option key={cat.id} value={cat.id}>{cat.name}</option>
                     ))}
                   </select>
                 </div>
@@ -1559,7 +1482,6 @@ const ProductsView: React.FC = () => {
                         loading="lazy"
                         decoding="async"
                       />
-
                       <button
                         type="button"
                         onClick={() => removeImageFromEdit(idx)}
@@ -1570,7 +1492,6 @@ const ProductsView: React.FC = () => {
                       </button>
                     </div>
                   ))}
-
                   {!editingProduct.images?.length ? (
                     <div className="text-sm text-gray-400">Sin imágenes</div>
                   ) : null}
@@ -1607,7 +1528,6 @@ const ProductsView: React.FC = () => {
                       </button>
                     </div>
                   ))}
-
                   {!(editingProduct.videos || []).length ? (
                     <div className="text-sm text-gray-400">Sin videos</div>
                   ) : null}
@@ -1624,9 +1544,7 @@ const ProductsView: React.FC = () => {
                     onChange={(e) => {
                       const checked = e.target.checked;
                       setEditUseVariants(checked);
-                      if (!checked) {
-                        setEditingProduct({ ...editingProduct, variants: [] });
-                      }
+                      if (!checked) setEditingProduct({ ...editingProduct, variants: [] });
                     }}
                   />
                   <label htmlFor="editUseVariants" className="text-sm text-gray-700">
@@ -1642,7 +1560,6 @@ const ProductsView: React.FC = () => {
                 ) : null}
               </div>
 
-              {/* Actions */}
               <div className="flex gap-2">
                 <button
                   type="button"
@@ -1674,11 +1591,9 @@ const ProductsView: React.FC = () => {
                 <div className="text-xs text-gray-500">{uploadProgress.currentName}</div>
               </div>
             </div>
-
             <div className="mt-4 text-xs text-gray-600">
               {uploadProgress.done}/{uploadProgress.total}
             </div>
-
             <div className="mt-2 h-2 bg-gray-100 rounded-full overflow-hidden">
               <div
                 className="h-full bg-indigo-600"
@@ -1690,14 +1605,12 @@ const ProductsView: React.FC = () => {
                 }}
               />
             </div>
-
             <div className="mt-3 text-[11px] text-gray-400">
               No cierres esta ventana mientras se suben los archivos.
             </div>
           </div>
         </div>
       )}
-
     </div>
   );
 };

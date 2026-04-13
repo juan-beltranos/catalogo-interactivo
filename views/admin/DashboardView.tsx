@@ -16,10 +16,7 @@ import { Store } from "@/interfaces";
 import { formatCOP, relativeTime, safeDate, startOfToday } from "@/helpers";
 
 
-const statusBadge: Record<
-  OrderStatus,
-  { label: string; color: string }
-> = {
+const statusBadge: Record<OrderStatus, { label: string; color: string }> = {
   new: { label: "Nuevo", color: "bg-yellow-100 text-yellow-800" },
   confirmed: { label: "Confirmado", color: "bg-blue-100 text-blue-800" },
   preparing: { label: "En preparación", color: "bg-indigo-100 text-indigo-800" },
@@ -27,7 +24,20 @@ const statusBadge: Record<
   cancelled: { label: "Cancelado", color: "bg-red-100 text-red-800" },
 };
 
-
+// Caché en módulo: evita re-fetch al navegar entre vistas sin recargar la app.
+// Se invalida manualmente si el storeId cambia.
+type DashboardCache = {
+  storeId: string;
+  productsCount: number;
+  ordersCount: number;
+  clientsCount: number;
+  revenueTotal: number;
+  ordersToday: number;
+  recentOrders: Order[];
+  fetchedAt: number; // timestamp ms — TTL de 60 s para no mostrar datos obsoletos
+};
+let dashboardCache: DashboardCache | null = null;
+const CACHE_TTL_MS = 60_000;
 
 const StatCard: React.FC<{
   title: string;
@@ -65,23 +75,19 @@ const DashboardView: React.FC = () => {
   const [store, setStore] = useState<Store | null>(null);
   const [loading, setLoading] = useState(true);
 
-  // Stats
   const [productsCount, setProductsCount] = useState(0);
   const [ordersCount, setOrdersCount] = useState(0);
   const [clientsCount, setClientsCount] = useState(0);
   const [revenueTotal, setRevenueTotal] = useState(0);
   const [ordersToday, setOrdersToday] = useState(0);
-
-  // Recent orders
   const [recentOrders, setRecentOrders] = useState<Order[]>([]);
 
   const catalogUrl = useMemo(() => {
     if (!store?.slug) return "";
-    // HashRouter
     return `${window.location.origin}/#/${store.slug}`;
   }, [store?.slug]);
 
-  // 1) Load store by ownerUid
+  // 1) Cargar tienda por ownerUid
   useEffect(() => {
     if (!user) return;
 
@@ -121,39 +127,60 @@ const DashboardView: React.FC = () => {
     run();
   }, [user]);
 
-  // 2) Load stats + recent orders
+  // 2) Cargar stats — optimizado:
+  //    • Agrupa los 3 getCountFromServer en un Promise.all (1 round-trip)
+  //    • Un solo getDocs(limit 5) para pedidos recientes
+  //    • Un solo getDocs(limit 50) para revenue + ordersToday en lugar de 200
+  //    • Caché con TTL de 60 s: navegar a otra sección y volver no genera lecturas
   useEffect(() => {
     if (!store?.id) return;
 
+    const now = Date.now();
+    const cached = dashboardCache;
+
+    if (
+      cached &&
+      cached.storeId === store.id &&
+      now - cached.fetchedAt < CACHE_TTL_MS
+    ) {
+      setProductsCount(cached.productsCount);
+      setOrdersCount(cached.ordersCount);
+      setClientsCount(cached.clientsCount);
+      setRevenueTotal(cached.revenueTotal);
+      setOrdersToday(cached.ordersToday);
+      setRecentOrders(cached.recentOrders);
+      return;
+    }
+
     const run = async () => {
       try {
-        // counts
         const productsRef = collection(db, "stores", store.id, "products");
         const ordersRef = collection(db, "stores", store.id, "orders");
         const clientsRef = collection(db, "stores", store.id, "clients");
 
-        const [pCountSnap, oCountSnap, cCountSnap] = await Promise.all([
+        // Batch: 3 counts + últimos 50 pedidos en paralelo (4 lecturas de índice)
+        // Los 50 pedidos sirven tanto para "recientes" como para revenue/ordersToday.
+        const qRecent = query(ordersRef, orderBy("createdAt", "desc"), limit(50));
+
+        const [pSnap, oSnap, cSnap, ordersSnap] = await Promise.all([
           getCountFromServer(productsRef),
           getCountFromServer(ordersRef),
           getCountFromServer(clientsRef),
+          getDocs(qRecent),
         ]);
 
-        setProductsCount(pCountSnap.data().count || 0);
-        setOrdersCount(oCountSnap.data().count || 0);
-        setClientsCount(cCountSnap.data().count || 0);
+        const pCount = pSnap.data().count || 0;
+        const oCount = oSnap.data().count || 0;
+        const cCount = cSnap.data().count || 0;
 
-        // recent orders (last 8)
-        const qRecent = query(ordersRef, orderBy("createdAt", "desc"), limit(8));
-        const recentSnap = await getDocs(qRecent);
-
-        const recent: Order[] = recentSnap.docs.map((docu) => {
+        // Pedidos recientes (solo los primeros 5 para la tabla)
+        const recent: Order[] = ordersSnap.docs.slice(0, 5).map((docu) => {
           const x = docu.data() as any;
           const customer = x.customer ?? {
             name: x.customerName ?? "",
             phone: x.customerPhone ?? "",
             address: x.customerAddress ?? "",
           };
-
           return {
             id: docu.id,
             status: (x.status ?? "new") as OrderStatus,
@@ -167,29 +194,36 @@ const DashboardView: React.FC = () => {
           } as Order;
         });
 
-        setRecentOrders(recent);
-
-        // revenue + ordersToday (simple MVP: compute from recent N or read all)
-        // Para un MVP “coherente”: calculamos con últimos 200 pedidos para no cargar infinito.
-        // Luego puedes mover esto a Cloud Functions / aggregate docs.
-        const qAgg = query(ordersRef, orderBy("createdAt", "desc"), limit(200));
-        const aggSnap = await getDocs(qAgg);
-
+        // Revenue + ordersToday — calculados sobre los mismos 50 docs (sin lectura extra)
         let revenue = 0;
         let today = 0;
         const todayStart = startOfToday().getTime();
 
-        aggSnap.docs.forEach((d) => {
+        ordersSnap.docs.forEach((d) => {
           const x = d.data() as any;
-          const total = Number(x.total ?? 0);
-          revenue += total;
-
+          revenue += Number(x.total ?? 0);
           const created = safeDate(x.createdAt);
           if (created && created.getTime() >= todayStart) today += 1;
         });
 
+        setProductsCount(pCount);
+        setOrdersCount(oCount);
+        setClientsCount(cCount);
         setRevenueTotal(revenue);
         setOrdersToday(today);
+        setRecentOrders(recent);
+
+        // Guardar en caché
+        dashboardCache = {
+          storeId: store.id,
+          productsCount: pCount,
+          ordersCount: oCount,
+          clientsCount: cCount,
+          revenueTotal: revenue,
+          ordersToday: today,
+          recentOrders: recent,
+          fetchedAt: Date.now(),
+        };
       } catch (e) {
         console.error(e);
       }
@@ -281,7 +315,7 @@ const DashboardView: React.FC = () => {
           value={formatCOP(revenueTotal)}
           icon="fa-sack-dollar"
           color="bg-rose-600"
-          hint="últ. 200 pedidos"
+          hint="últ. 50 pedidos"
         />
       </div>
 

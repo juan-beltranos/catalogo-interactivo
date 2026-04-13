@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useParams } from "react-router-dom";
 import {
   collection,
@@ -27,6 +27,30 @@ import { applyDiscount, discountBadgeText, getBaseUnitPrice, getFinalUnitPrice, 
 const PAGE_SIZE = 20;
 const ALL_BATCH = 500;
 
+// Caché en memoria: storeId -> categoryId -> { products, lastDoc, hasMore }
+type PageCache = {
+  products: Product[];
+  lastDoc: QueryDocumentSnapshot<DocumentData> | null;
+  hasMore: boolean;
+};
+const catalogCache = new Map<string, Map<string, PageCache>>();
+
+const getCategoryCache = (storeId: string, categoryId: string): PageCache | null => {
+  return catalogCache.get(storeId)?.get(categoryId) ?? null;
+};
+
+const setCategoryCache = (storeId: string, categoryId: string, data: PageCache) => {
+  if (!catalogCache.has(storeId)) catalogCache.set(storeId, new Map());
+  catalogCache.get(storeId)!.set(categoryId, data);
+};
+
+const clearStoreCache = (storeId: string) => {
+  catalogCache.delete(storeId);
+};
+
+// Caché global de allProducts por storeId
+const allProductsCache = new Map<string, Product[]>();
+
 
 const CatalogView: React.FC = () => {
   const { slug } = useParams<{ slug: string }>();
@@ -51,18 +75,15 @@ const CatalogView: React.FC = () => {
   const [search, setSearch] = useState("");
   const [queryError, setQueryError] = useState<string | null>(null);
 
-
   const [loadingMore, setLoadingMore] = useState(false);
   const [hasMore, setHasMore] = useState(false);
-  const [lastDoc, setLastDoc] =
-    useState<QueryDocumentSnapshot<DocumentData> | null>(null);
+  const [lastDoc, setLastDoc] = useState<QueryDocumentSnapshot<DocumentData> | null>(null);
 
   const [allProducts, setAllProducts] = useState<Product[]>([]);
   const [allLoaded, setAllLoaded] = useState(false);
   const [searchLoading, setSearchLoading] = useState(false);
 
   const isSearching = search.trim().length > 0;
-
 
   // Variant picker modal
   const [productModal, setProductModal] = useState<{
@@ -81,9 +102,7 @@ const CatalogView: React.FC = () => {
 
   const filteredProducts = useMemo(() => {
     const q = norm(search);
-
     const source = q ? allProducts : products;
-
     const visible = source.filter((p) => p.isActive !== false);
 
     if (!q) {
@@ -94,27 +113,18 @@ const CatalogView: React.FC = () => {
 
     return visible.filter((p) => {
       const catName = categoryNameById.get(p.categoryId) || "";
-
       const variantsText = (p.variants || [])
         .map((v: any) => `${v.title ?? ""} ${v.sku ?? ""}`)
         .join(" ");
-
       const priceText = `${p.price ?? ""} ${(p.variants || []).map((v: any) => v.price ?? "").join(" ")}`;
-
       const haystack = norm(
         `${p.name} ${p.sku ?? ""} ${p.description ?? ""} ${catName} ${variantsText} ${priceText}`
       );
-
       return haystack.includes(q);
     });
   }, [search, allProducts, products, activeCategoryId, categoryNameById]);
 
-  useEffect(() => {
-    if (!categories.length) return;
-    if (activeCategoryId !== "all") return;
-    setActiveCategoryId("all");
-  }, [categories]);
-
+  // Persist cart in localStorage
   useEffect(() => {
     if (!slug) return;
     try {
@@ -128,6 +138,7 @@ const CatalogView: React.FC = () => {
     localStorage.setItem(cartStorageKey(slug), JSON.stringify(cart));
   }, [cart, slug]);
 
+  // Load store by slug
   useEffect(() => {
     const fetchStoreBySlug = async () => {
       if (!slug) return;
@@ -157,6 +168,7 @@ const CatalogView: React.FC = () => {
     fetchStoreBySlug();
   }, [slug]);
 
+  // Subscribe to categories
   useEffect(() => {
     if (!store) return;
 
@@ -172,12 +184,186 @@ const CatalogView: React.FC = () => {
     return () => unsubscribeCats();
   }, [store]);
 
+  // Fetch all products for search (cached globally per storeId)
+  const fetchAllProductsOnce = useCallback(async (storeId: string) => {
+    // Return cached result if already loaded
+    if (allProductsCache.has(storeId)) {
+      setAllProducts(allProductsCache.get(storeId)!);
+      setAllLoaded(true);
+      return;
+    }
+
+    setSearchLoading(true);
+    setQueryError(null);
+
+    try {
+      const baseRef = collection(db, "stores", storeId, "products");
+      let acc: Product[] = [];
+      let cursor: QueryDocumentSnapshot<DocumentData> | null = null;
+
+      while (true) {
+        const constraints: any[] = [orderBy("createdAt", "desc"), limit(ALL_BATCH)];
+        if (cursor) constraints.splice(1, 0, startAfter(cursor));
+
+        const qAll = query(baseRef, ...constraints);
+        const snap = await getDocs(qAll);
+        const docs = snap.docs;
+        acc = acc.concat(docs.map((d) => ({ id: d.id, ...(d.data() as any) })) as Product[]);
+
+        if (docs.length < ALL_BATCH) break;
+        cursor = docs[docs.length - 1];
+      }
+
+      allProductsCache.set(storeId, acc);
+      setAllProducts(acc);
+      setAllLoaded(true);
+    } catch (e: any) {
+      console.error("fetchAllProductsOnce error:", e);
+      setQueryError("Error cargando productos para búsqueda. Revisa la consola.");
+    } finally {
+      setSearchLoading(false);
+    }
+  }, []);
+
+  // Trigger search fetch when needed
+  const storeIdRef = useRef<string | null>(null);
   useEffect(() => {
     if (!store) return;
+    storeIdRef.current = store.id;
     if (!isSearching) return;
+    fetchAllProductsOnce(store.id);
+  }, [store?.id, isSearching, fetchAllProductsOnce]);
 
-    fetchAllProductsOnce();
-  }, [store?.id, isSearching]);
+  // Fetch first page of products (with per-category cache)
+  const fetchFirstPage = useCallback(async (storeId: string, categoryId: string) => {
+    // Serve from cache if available
+    const cached = getCategoryCache(storeId, categoryId);
+    if (cached) {
+      setProducts(cached.products);
+      setHasMore(cached.hasMore);
+      setLastDoc(cached.lastDoc);
+      setLoading(false);
+      return;
+    }
+
+    setLoading(true);
+    setQueryError(null);
+
+    try {
+      const baseRef = collection(db, "stores", storeId, "products");
+      const constraints: any[] = [
+        orderBy("createdAt", "desc"),
+        limit(PAGE_SIZE + 1),
+      ];
+
+      if (categoryId !== "all") {
+        constraints.unshift(where("categoryId", "==", categoryId));
+      }
+
+      const qProds = query(baseRef, ...constraints);
+      const snap = await getDocs(qProds);
+      const docs = snap.docs;
+
+      const more = docs.length > PAGE_SIZE;
+      const pageDocs = more ? docs.slice(0, PAGE_SIZE) : docs;
+      const pageProducts = pageDocs.map((d) => ({ id: d.id, ...(d.data() as any) })) as Product[];
+      const newLastDoc = pageDocs[pageDocs.length - 1] ?? null;
+
+      // Save to cache
+      setCategoryCache(storeId, categoryId, {
+        products: pageProducts,
+        lastDoc: newLastDoc,
+        hasMore: more,
+      });
+
+      setProducts(pageProducts);
+      setHasMore(more);
+      setLastDoc(newLastDoc);
+    } catch (e: any) {
+      console.error("fetchFirstPage error:", e);
+      const msg =
+        String(e?.message || "").toLowerCase().includes("index")
+          ? "Falta un índice en Firestore para filtrar por categoría. Revisa la consola (hay un link automático para crearlo)."
+          : "Error consultando productos. Revisa la consola.";
+      setQueryError(msg);
+      setProducts([]);
+      setHasMore(false);
+      setLastDoc(null);
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  // Fetch next page and append to cache
+  const fetchMorePage = useCallback(async () => {
+    if (!store || !lastDoc || !hasMore || loadingMore) return;
+
+    setLoadingMore(true);
+    setQueryError(null);
+
+    try {
+      const baseRef = collection(db, "stores", store.id, "products");
+      const constraints: any[] = [
+        orderBy("createdAt", "desc"),
+        startAfter(lastDoc),
+        limit(PAGE_SIZE + 1),
+      ];
+
+      if (activeCategoryId !== "all") {
+        constraints.unshift(where("categoryId", "==", activeCategoryId));
+      }
+
+      const qMore = query(baseRef, ...constraints);
+      const snap = await getDocs(qMore);
+      const docs = snap.docs;
+
+      const more = docs.length > PAGE_SIZE;
+      const pageDocs = more ? docs.slice(0, PAGE_SIZE) : docs;
+      const newProducts = pageDocs.map((d) => ({ id: d.id, ...(d.data() as any) })) as Product[];
+      const newLastDoc = pageDocs[pageDocs.length - 1] ?? lastDoc;
+
+      setProducts((prev) => {
+        const merged = [...prev, ...newProducts];
+
+        // Update cache with the full accumulated list
+        setCategoryCache(store.id, activeCategoryId, {
+          products: merged,
+          lastDoc: newLastDoc,
+          hasMore: more,
+        });
+
+        return merged;
+      });
+
+      setHasMore(more);
+      setLastDoc(newLastDoc);
+    } catch (e: any) {
+      console.error("fetchMorePage error:", e);
+      const msg =
+        String(e?.message || "").toLowerCase().includes("index")
+          ? "Falta un índice en Firestore para paginar por categoría. Revisa la consola para crearlo."
+          : "Error cargando más productos. Revisa la consola.";
+      setQueryError(msg);
+    } finally {
+      setLoadingMore(false);
+    }
+  }, [store, lastDoc, hasMore, loadingMore, activeCategoryId]);
+
+  // Trigger first page load when store or category changes
+  useEffect(() => {
+    if (!store) return;
+    fetchFirstPage(store.id, activeCategoryId);
+  }, [store?.id, activeCategoryId, fetchFirstPage]);
+
+  // Sync allProducts state when cache already has them (e.g. category switch after search)
+  useEffect(() => {
+    if (!store) return;
+    const cached = allProductsCache.get(store.id);
+    if (cached) {
+      setAllProducts(cached);
+      setAllLoaded(true);
+    }
+  }, [store?.id]);
 
 
   const addToCart = (prod: Product, variant?: Variant) => {
@@ -224,12 +410,9 @@ const CatalogView: React.FC = () => {
       const q = it.qty + delta;
       const prod = products.find(p => p.id === it.productId);
       const v = prod?.variants?.find(vv => vv.id === it.variantId);
-
-      const maxStock =
-        v && typeof v.stock === "number" ? v.stock : undefined;
+      const maxStock = v && typeof v.stock === "number" ? v.stock : undefined;
 
       if (maxStock !== undefined && q > maxStock) return prev;
-
       if (q <= 0) next.splice(index, 1);
       else next[index] = { ...it, qty: q };
       return next;
@@ -272,15 +455,12 @@ const CatalogView: React.FC = () => {
 
       const orderTotal = calcTotal(cart);
 
-      // refs
-      const clientRef = doc(db, "stores", store.id, "clients", cleanPhone); // clientId = phone
-      const orderRef = doc(collection(db, "stores", store.id, "orders"));   // id automático
+      const clientRef = doc(db, "stores", store.id, "clients", cleanPhone);
+      const orderRef = doc(collection(db, "stores", store.id, "orders"));
 
-      // Transacción: upsert cliente + crear orden
       await runTransaction(db, async (tx) => {
         const clientSnap = await tx.get(clientRef);
 
-        // Upsert cliente
         if (!clientSnap.exists()) {
           tx.set(clientRef, {
             name: cleanName,
@@ -294,10 +474,9 @@ const CatalogView: React.FC = () => {
             totalSpent: orderTotal,
           });
         } else {
-          // Si existe, actualiza datos y contadores
           tx.update(clientRef, {
-            name: cleanName,            // si cambia, lo actualizamos
-            address: cleanAddress,      // si cambia, lo actualizamos
+            name: cleanName,
+            address: cleanAddress,
             updatedAt: serverTimestamp(),
             lastOrderAt: serverTimestamp(),
             totalOrders: increment(1),
@@ -305,11 +484,10 @@ const CatalogView: React.FC = () => {
           });
         }
 
-        // Crear pedido y referenciar al cliente
         tx.set(orderRef, {
           status: "new",
           channel: "whatsapp",
-          clientId: cleanPhone, // referencia al cliente
+          clientId: cleanPhone,
           customer: {
             name: cleanName,
             phone: cleanPhone,
@@ -323,7 +501,6 @@ const CatalogView: React.FC = () => {
         });
       });
 
-      // Mensaje a WhatsApp (usa orderRef.id)
       const lines: string[] = [];
       lines.push("🛒 *Nuevo pedido*");
       lines.push(`Tienda: *${store.name}*`);
@@ -356,154 +533,11 @@ const CatalogView: React.FC = () => {
     }
   };
 
-
   const hasValidDiscount = (p?: Product | null) => {
     const d = p?.discount;
     if (!d || !d.value) return false;
     const v = Number(d.value) || 0;
     return v > 0;
-  };
-
-  const fetchFirstPage = async () => {
-    if (!store) return;
-
-    setLoading(true);
-    setQueryError(null);
-
-    try {
-      const baseRef = collection(db, "stores", store.id, "products");
-
-      const constraints: any[] = [
-        orderBy("createdAt", "desc"),
-        limit(PAGE_SIZE + 1),
-      ];
-
-      if (activeCategoryId !== "all") {
-        constraints.unshift(where("categoryId", "==", activeCategoryId));
-      }
-
-      const qProds = query(baseRef, ...constraints);
-      const snap = await getDocs(qProds);
-      const docs = snap.docs;
-
-      const more = docs.length > PAGE_SIZE;
-      const pageDocs = more ? docs.slice(0, PAGE_SIZE) : docs;
-
-      setProducts(pageDocs.map((d) => ({ id: d.id, ...(d.data() as any) })) as Product[]);
-      setHasMore(more);
-      setLastDoc(pageDocs[pageDocs.length - 1] ?? null);
-    } catch (e: any) {
-      console.error("fetchFirstPage error:", e);
-
-      // Mensaje amigable si es índice faltante
-      const msg =
-        String(e?.message || "").toLowerCase().includes("index")
-          ? "Falta un índice en Firestore para filtrar por categoría. Revisa la consola (hay un link automático para crearlo)."
-          : "Error consultando productos. Revisa la consola.";
-
-      setQueryError(msg);
-
-      setProducts([]);
-      setHasMore(false);
-      setLastDoc(null);
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  const fetchMorePage = async () => {
-    if (!store || !lastDoc || !hasMore || loadingMore) return;
-
-    setLoadingMore(true);
-    setQueryError(null);
-
-    try {
-      const baseRef = collection(db, "stores", store.id, "products");
-
-      const constraints: any[] = [
-        orderBy("createdAt", "desc"),
-        startAfter(lastDoc),
-        limit(PAGE_SIZE + 1),
-      ];
-
-      if (activeCategoryId !== "all") {
-        constraints.unshift(where("categoryId", "==", activeCategoryId));
-      }
-
-      const qMore = query(baseRef, ...constraints);
-
-      const snap = await getDocs(qMore);
-      const docs = snap.docs;
-
-      const more = docs.length > PAGE_SIZE;
-      const pageDocs = more ? docs.slice(0, PAGE_SIZE) : docs;
-
-      setProducts((prev) => [
-        ...prev,
-        ...(pageDocs.map((d) => ({ id: d.id, ...(d.data() as any) })) as Product[]),
-      ]);
-
-      setHasMore(more);
-      setLastDoc(pageDocs[pageDocs.length - 1] ?? lastDoc);
-    } catch (e: any) {
-      console.error("fetchMorePage error:", e);
-
-      const msg =
-        String(e?.message || "").toLowerCase().includes("index")
-          ? "Falta un índice en Firestore para paginar por categoría. Revisa la consola para crearlo."
-          : "Error cargando más productos. Revisa la consola.";
-
-      setQueryError(msg);
-    } finally {
-      setLoadingMore(false);
-    }
-  };
-
-  useEffect(() => {
-    if (!store) return;
-
-    setProducts([]);
-    setLastDoc(null);
-    setHasMore(false);
-
-    fetchFirstPage();
-  }, [store?.id, activeCategoryId]);
-
-
-  const fetchAllProductsOnce = async () => {
-    if (!store || allLoaded || searchLoading) return;
-
-    setSearchLoading(true);
-    setQueryError(null);
-
-    try {
-      const baseRef = collection(db, "stores", store.id, "products");
-
-      let acc: Product[] = [];
-      let cursor: QueryDocumentSnapshot<DocumentData> | null = null;
-
-      while (true) {
-        const constraints: any[] = [orderBy("createdAt", "desc"), limit(ALL_BATCH)];
-        if (cursor) constraints.splice(1, 0, startAfter(cursor)); // after orderBy
-
-        const qAll = query(baseRef, ...constraints);
-        const snap = await getDocs(qAll);
-
-        const docs = snap.docs;
-        acc = acc.concat(docs.map((d) => ({ id: d.id, ...(d.data() as any) })) as Product[]);
-
-        if (docs.length < ALL_BATCH) break;
-        cursor = docs[docs.length - 1];
-      }
-
-      setAllProducts(acc);
-      setAllLoaded(true);
-    } catch (e: any) {
-      console.error("fetchAllProductsOnce error:", e);
-      setQueryError("Error cargando productos para búsqueda. Revisa la consola.");
-    } finally {
-      setSearchLoading(false);
-    }
   };
 
 
@@ -563,7 +597,7 @@ const CatalogView: React.FC = () => {
             </div>
           </div>
 
-          {/* Optional: línea fina elegante */}
+          {/* Línea decorativa */}
           <div className="mt-4 h-px bg-gradient-to-r from-transparent via-gray-200 to-transparent" />
         </div>
       </header>
@@ -572,7 +606,6 @@ const CatalogView: React.FC = () => {
       <div className="sticky top-[73px] sm:top-[80px] z-30 bg-white/80 backdrop-blur border-b">
         <div className="max-w-6xl mx-auto px-4 py-3">
           <div className="flex items-center gap-2 overflow-x-auto no-scrollbar">
-            {/* All */}
             <button
               type="button"
               onClick={() => setActiveCategoryId("all")}
@@ -605,8 +638,6 @@ const CatalogView: React.FC = () => {
 
       {/* Content */}
       <main className="max-w-6xl mx-auto px-4 py-6 space-y-6">
-        {/* Título de la vista */}
-
         <div className="flex items-center gap-2">
           <div className="relative flex-1">
             <i className="fa-solid fa-magnifying-glass absolute left-3 top-1/2 -translate-y-1/2 text-gray-400 text-sm" />
@@ -629,12 +660,12 @@ const CatalogView: React.FC = () => {
             ) : null}
           </div>
         </div>
+
         {isSearching && !allLoaded ? (
           <div className="text-sm text-gray-500">
             {searchLoading ? "Preparando búsqueda en todos los productos..." : "Cargando productos para búsqueda..."}
           </div>
         ) : null}
-
 
         <div className="flex items-center justify-between">
           <div className="text-sm text-gray-500">
@@ -648,7 +679,7 @@ const CatalogView: React.FC = () => {
             <button
               type="button"
               onClick={() => setActiveCategoryId("all")}
-              className="text-sm font-extrabold  hover:text-indigo-900"
+              className="text-sm font-extrabold hover:text-indigo-900"
             >
               Ver todo
             </button>
@@ -669,7 +700,6 @@ const CatalogView: React.FC = () => {
               const badge = discountBadgeText((prod as any).discount);
               const discOk = hasValidDiscount(prod);
               const cardPrice = getProductCardPrice(prod);
-
 
               return (
                 <div
@@ -696,7 +726,6 @@ const CatalogView: React.FC = () => {
                       </div>
                     )}
 
-                    {/* Badge descuento */}
                     {badge ? (
                       <div className="absolute top-3 left-3 z-20 pointer-events-none">
                         <span className="inline-flex items-center rounded-full bg-yellow-400 text-white px-3 py-1 text-xs font-extrabold shadow-sm">
@@ -709,11 +738,10 @@ const CatalogView: React.FC = () => {
                   <div className="p-3 sm:p-4 flex-1 flex flex-col">
                     <div className="flex flex-col gap-1">
                       <div className="flex items-start justify-between gap-2">
-                        <h3 className="text-sm sm:text-[15px] font-extrabold text-gray-900 ">
+                        <h3 className="text-sm sm:text-[15px] font-extrabold text-gray-900">
                           {prod.name}
                         </h3>
 
-                        {/* En pantallas sm+ mantenemos el SKU al lado */}
                         {prod.sku ? (
                           <span className="hidden sm:inline-flex shrink-0 text-[10px] font-bold text-gray-500 bg-gray-100 border border-gray-200 rounded-full px-2 py-1">
                             SKU: {prod.sku}
@@ -721,14 +749,12 @@ const CatalogView: React.FC = () => {
                         ) : null}
                       </div>
 
-                      {/* En móvil mostramos el SKU debajo para que no corte el nombre */}
                       {prod.sku ? (
                         <span className="sm:hidden inline-flex w-fit text-[10px] font-bold text-gray-500 bg-gray-100 border border-gray-200 rounded-full px-2 py-1">
                           SKU: {prod.sku}
                         </span>
                       ) : null}
                     </div>
-
 
                     {prod.description ? (
                       <p className="text-xs text-gray-500 mt-1 line-clamp-2">
@@ -738,7 +764,6 @@ const CatalogView: React.FC = () => {
                       <p className="text-xs text-gray-400 mt-1 line-clamp-2">&nbsp;</p>
                     )}
 
-                    {/* Precio tachado + final (solo si NO hay variantes) */}
                     <div className="mt-2">
                       {discOk ? (
                         <div className="flex items-baseline gap-2">
@@ -762,7 +787,6 @@ const CatalogView: React.FC = () => {
                       )}
                     </div>
 
-
                     <button
                       onClick={() => openAddFlow(prod)}
                       className="mt-3 w-full rounded-xl py-2.5 text-xs sm:text-sm font-extrabold
@@ -778,7 +802,6 @@ const CatalogView: React.FC = () => {
                     ) : null}
                   </div>
                 </div>
-
               );
             })}
           </div>
@@ -795,8 +818,6 @@ const CatalogView: React.FC = () => {
             </button>
           </div>
         ) : null}
-
-
       </main>
 
       {/* Bottom CTA */}
@@ -818,11 +839,10 @@ const CatalogView: React.FC = () => {
         </div>
       )}
 
-      {/* Variant Modal (mejorada) */}
+      {/* Variant Modal */}
       {productModal.open && productModal.product && (
         <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center p-0 sm:p-4 bg-black/50">
           <div className="bg-white w-full sm:max-w-lg rounded-t-3xl sm:rounded-3xl overflow-hidden shadow-xl">
-            {/* Header */}
             <div className="p-4 sm:p-6 border-b flex items-start justify-between gap-3">
               <div className="min-w-0 flex-1">
                 <div className="text-lg sm:text-xl font-extrabold text-gray-900 break-words">
@@ -841,14 +861,12 @@ const CatalogView: React.FC = () => {
               </button>
             </div>
 
-            {/* Body */}
             <div className="p-4 sm:p-6 space-y-4 max-h-[75vh] overflow-auto">
               <ImageCarousel
                 images={(productModal.product.images || []).map((x: any) => x.url).filter(Boolean)}
                 alt={productModal.product.name}
               />
 
-              {/* Descripción completa con scroll interno */}
               {productModal.product.description ? (
                 <div className="space-y-2">
                   <div className="text-sm font-extrabold text-gray-900">Descripción</div>
@@ -871,12 +889,10 @@ const CatalogView: React.FC = () => {
                 </div>
               ) : null}
 
-              {/* Price */}
               <div className="flex items-center justify-between">
                 <div className="text-sm text-gray-500">Precio</div>
                 {(() => {
                   const modalPrice = getProductCardPrice(productModal.product);
-
                   return (
                     <div className="font-extrabold">
                       {hasValidDiscount(productModal.product) ? (
@@ -902,11 +918,9 @@ const CatalogView: React.FC = () => {
                 })()}
               </div>
 
-              {/* Variants */}
               {(productModal.product.variants?.length ?? 0) > 0 ? (
                 <div className="space-y-2">
                   <div className="text-sm font-extrabold text-gray-900">Variantes</div>
-
                   <div className="grid grid-cols-1 gap-2">
                     {(productModal.product.variants || []).map((v) => {
                       const outOfStock = typeof v.stock === "number" && v.stock <= 0;
@@ -959,7 +973,6 @@ const CatalogView: React.FC = () => {
               ) : null}
             </div>
 
-            {/* Footer */}
             <div className="p-4 sm:p-6 border-t bg-white">
               <button
                 type="button"
@@ -996,11 +1009,10 @@ const CatalogView: React.FC = () => {
         </div>
       )}
 
-      {/* Checkout Drawer (móvil) + Modal (desktop) */}
+      {/* Checkout Drawer */}
       {checkoutOpen && (
         <div className="fixed inset-0 z-50 bg-black/50 flex items-end sm:items-center justify-center">
           <div className="w-full sm:max-w-xl bg-white rounded-t-3xl sm:rounded-3xl h-full overflow-hidden shadow-2xl">
-            {/* header */}
             <div className="p-4 sm:p-6 border-b flex items-start justify-between gap-3">
               <div>
                 <div className="text-xl font-extrabold text-gray-900">Tu pedido</div>
@@ -1016,7 +1028,6 @@ const CatalogView: React.FC = () => {
             </div>
 
             <div className="p-4 sm:p-6 overflow-auto max-h-[70vh]">
-              {/* cart list */}
               <div className="space-y-3">
                 {cart.length === 0 ? (
                   <div className="text-gray-400">Tu carrito está vacío.</div>
@@ -1028,14 +1039,12 @@ const CatalogView: React.FC = () => {
                     >
                       <div className="w-16 h-16 rounded-2xl bg-gray-100 overflow-hidden border relative">
                         {it.imageUrl ? (
-                          <>
-                            <img
-                              src={it.imageUrl ? cldImg(it.imageUrl, { w: 160, h: 160, crop: "fill" }) : ""}
-                              alt={it.productName}
-                              className="relative z-10 w-full h-full object-contain"
-                              loading="lazy"
-                            />
-                          </>
+                          <img
+                            src={it.imageUrl ? cldImg(it.imageUrl, { w: 160, h: 160, crop: "fill" }) : ""}
+                            alt={it.productName}
+                            className="relative z-10 w-full h-full object-contain"
+                            loading="lazy"
+                          />
                         ) : (
                           <div className="w-full h-full flex items-center justify-center text-gray-400">
                             <i className="fa-regular fa-image text-sm" />
@@ -1089,15 +1098,13 @@ const CatalogView: React.FC = () => {
                 )}
               </div>
 
-              {/* total */}
               {cart.length > 0 ? (
                 <div className="mt-5 flex items-center justify-between border-t pt-4">
                   <div className="font-extrabold text-gray-900">Total</div>
-                  <div className="font-black  text-lg">{formatCOP(total)}</div>
+                  <div className="font-black text-lg">{formatCOP(total)}</div>
                 </div>
               ) : null}
 
-              {/* form */}
               <div className="mt-6 space-y-3">
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                   <div className="sm:col-span-1">
@@ -1144,7 +1151,6 @@ const CatalogView: React.FC = () => {
               </div>
             </div>
 
-            {/* footer actions */}
             <div className="p-4 sm:p-6 border-t bg-white">
               <div className="flex gap-2">
                 <button
@@ -1178,7 +1184,6 @@ const CatalogView: React.FC = () => {
       )}
     </div>
   );
-
 };
 
 export default CatalogView;
