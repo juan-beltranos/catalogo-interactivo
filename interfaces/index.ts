@@ -40,6 +40,7 @@ export interface SidebarItemProps {
     label: string;
     active: boolean;
     onNavigate?: () => void;
+    disabled?: boolean;
 }
 
 export interface Category {

@@ -17,6 +17,8 @@ import {
   endBefore,
   limit,
   limitToLast,
+  getCountFromServer,
+  writeBatch,
 } from "firebase/firestore";
 import { db } from "../../lib/firebase";
 import { useAuth } from "../../context/AuthContext";
@@ -35,10 +37,12 @@ import { cloudinaryConfig } from "@/lib/cloudinary";
 
 const PAGE_SIZE = 10;
 
-// ---------------------------------------------------------------------------
-// Caché de módulo — sobrevive navegación entre vistas sin recargar la app.
-// Se invalida cuando cambia el storeId.
-// ---------------------------------------------------------------------------
+const FREE_MAX_PRODUCTS = 300;
+const FREE_MAX_IMAGES = 1;
+const FREE_MAX_VIDEOS = 0;
+const PRO_MAX_IMAGES = 5;
+const PRO_MAX_VIDEOS = 1;
+
 type PageCache = {
   storeId: string;
   products: Product[];
@@ -48,13 +52,14 @@ type PageCache = {
 };
 let pageCache: PageCache | null = null;
 
-// Caché de allProducts para búsqueda (por storeId)
 const allProductsCache = new Map<string, Product[]>();
 
 const ProductsView: React.FC = () => {
   const { user } = useAuth();
 
   const [storeId, setStoreId] = useState<string | null>(null);
+  const [hasActiveSubscription, setHasActiveSubscription] = useState<boolean>(false);
+
   const [products, setProducts] = useState<Product[]>([]);
   const [categories, setCategories] = useState<{ id: string; name: string; order?: number }[]>([]);
   const [loading, setLoading] = useState(true);
@@ -63,12 +68,15 @@ const ProductsView: React.FC = () => {
   const [hasNext, setHasNext] = useState(false);
   const [loadingPage, setLoadingPage] = useState(false);
 
-  const [pageFirstDoc, setPageFirstDoc] =
-    useState<QueryDocumentSnapshot<DocumentData> | null>(null);
-  const [pageLastDoc, setPageLastDoc] =
-    useState<QueryDocumentSnapshot<DocumentData> | null>(null);
-
+  const [pageFirstDoc, setPageFirstDoc] = useState<QueryDocumentSnapshot<DocumentData> | null>(null);
+  const [pageLastDoc, setPageLastDoc] = useState<QueryDocumentSnapshot<DocumentData> | null>(null);
   const [history, setHistory] = useState<QueryDocumentSnapshot<DocumentData>[]>([]);
+
+  // ── Drag & drop state ────────────────────────────────────────────────────
+  const [dragIndex, setDragIndex] = useState<number | null>(null);
+  const [dragOverIndex, setDragOverIndex] = useState<number | null>(null);
+  const [savingOrder, setSavingOrder] = useState(false);
+  const dragNode = useRef<HTMLTableRowElement | null>(null);
 
   // Create form
   const [name, setName] = useState("");
@@ -83,7 +91,6 @@ const ProductsView: React.FC = () => {
   const [discountValueInput, setDiscountValueInput] = useState("");
   const [isActive, setIsActive] = useState(true);
 
-  // Variants (create)
   const [createVariants, setCreateVariants] = useState<Variant[]>([]);
   const [useVariants, setUseVariants] = useState(false);
   const [editUseVariants, setEditUseVariants] = useState(false);
@@ -100,13 +107,8 @@ const ProductsView: React.FC = () => {
   const [videoFiles, setVideoFiles] = useState<File[]>([]);
 
   const [uploading, setUploading] = useState(false);
-  const [uploadProgress, setUploadProgress] = useState({
-    total: 0,
-    done: 0,
-    currentName: "",
-  });
+  const [uploadProgress, setUploadProgress] = useState({ total: 0, done: 0, currentName: "" });
 
-  // SEARCH
   const [search, setSearch] = useState("");
   const [debouncedSearch, setDebouncedSearch] = useState("");
   const [searching, setSearching] = useState(false);
@@ -115,47 +117,42 @@ const ProductsView: React.FC = () => {
   const [allLoaded, setAllLoaded] = useState(false);
 
   const importJsonRef = useRef<HTMLInputElement | null>(null);
-
-  // Stable ref to prodsRef collection (avoids re-creating queries on every render)
   const prodsRefRef = useRef<ReturnType<typeof collection> | null>(null);
   const catsRefRef = useRef<ReturnType<typeof collection> | null>(null);
 
-  // ---------------------------------------------------------------------------
-  // 1) storeId del usuario actual
-  // ---------------------------------------------------------------------------
+  const maxImages = hasActiveSubscription ? PRO_MAX_IMAGES : FREE_MAX_IMAGES;
+  const maxVideos = hasActiveSubscription ? PRO_MAX_VIDEOS : FREE_MAX_VIDEOS;
+
   useEffect(() => {
     if (!user) return;
-
     const fetchStore = async () => {
       const q = query(collection(db, "stores"), where("ownerUid", "==", user.uid));
       const snap = await getDocs(q);
-      if (!snap.empty) setStoreId(snap.docs[0].id);
-      else console.error("No se encontró tienda para este usuario");
+      if (!snap.empty) {
+        const storeDoc = snap.docs[0];
+        setStoreId(storeDoc.id);
+        setHasActiveSubscription(storeDoc.data().hasActiveSubscription === true);
+      } else {
+        console.error("No se encontró tienda para este usuario");
+      }
     };
-
     fetchStore();
   }, [user]);
 
-  // ---------------------------------------------------------------------------
-  // 2) refs por tienda (estables, guardadas en refs para no recrear callbacks)
-  // ---------------------------------------------------------------------------
   const catsRef = useMemo(() => {
     if (!storeId) return null;
-    const ref = collection(db, "stores", storeId, "categories");
-    catsRefRef.current = ref;
-    return ref;
+    const r = collection(db, "stores", storeId, "categories");
+    catsRefRef.current = r;
+    return r;
   }, [storeId]);
 
   const prodsRef = useMemo(() => {
     if (!storeId) return null;
-    const ref = collection(db, "stores", storeId, "products");
-    prodsRefRef.current = ref;
-    return ref;
+    const r = collection(db, "stores", storeId, "products");
+    prodsRefRef.current = r;
+    return r;
   }, [storeId]);
 
-  // ---------------------------------------------------------------------------
-  // mapDocToProduct — puro, sin dependencias de estado
-  // ---------------------------------------------------------------------------
   const mapDocToProduct = useCallback(
     (d: QueryDocumentSnapshot<DocumentData>): Product => {
       const data = d.data() as any;
@@ -172,29 +169,20 @@ const ProductsView: React.FC = () => {
         options: (data.options ?? []) as ProductOption[],
         variants: (data.variants ?? []) as Variant[],
         isActive: data.isActive ?? true,
+        order: data.order ?? null,
       };
     },
     []
   );
 
-  // ---------------------------------------------------------------------------
-  // 3) Listeners de categorías + carga inicial de productos
-  // ---------------------------------------------------------------------------
   useEffect(() => {
     if (!storeId || !catsRef || !prodsRef) return;
 
     const qCats = query(catsRef, orderBy("name", "asc"));
     const unsubCats = onSnapshot(qCats, (snap) => {
-      setCategories(
-        snap.docs.map((d) => ({
-          id: d.id,
-          name: d.data().name,
-          order: d.data().order ?? 0,
-        }))
-      );
+      setCategories(snap.docs.map((d) => ({ id: d.id, name: d.data().name, order: d.data().order ?? 0 })));
     });
 
-    // Servir desde caché si el storeId coincide
     if (pageCache && pageCache.storeId === storeId) {
       setProducts(pageCache.products);
       setHasNext(pageCache.hasNext);
@@ -206,39 +194,25 @@ const ProductsView: React.FC = () => {
       loadFirstPage();
     }
 
-    // Sincronizar caché de allProducts si ya existe
     const cached = allProductsCache.get(storeId);
-    if (cached) {
-      setAllProducts(cached);
-      setAllLoaded(true);
-    }
+    if (cached) { setAllProducts(cached); setAllLoaded(true); }
 
-    return () => {
-      unsubCats();
-    };
+    return () => { unsubCats(); };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [storeId]);
 
-  // ---------------------------------------------------------------------------
-  // Debounce de búsqueda
-  // ---------------------------------------------------------------------------
   useEffect(() => {
     const t = setTimeout(() => setDebouncedSearch(search.trim().toLowerCase()), 350);
     return () => clearTimeout(t);
   }, [search]);
 
-  // ---------------------------------------------------------------------------
-  // loadAllProductsOnce — lazy, cacheado por storeId
-  // ---------------------------------------------------------------------------
   const loadAllProductsOnce = useCallback(async () => {
     if (!prodsRef || !storeId) return;
     if (allProductsCache.has(storeId)) {
-      const cached = allProductsCache.get(storeId)!;
-      setAllProducts(cached);
+      setAllProducts(allProductsCache.get(storeId)!);
       setAllLoaded(true);
       return;
     }
-
     setSearching(true);
     try {
       const snap = await getDocs(query(prodsRef, orderBy("createdAt", "desc")));
@@ -254,9 +228,6 @@ const ProductsView: React.FC = () => {
     }
   }, [prodsRef, storeId, mapDocToProduct]);
 
-  // ---------------------------------------------------------------------------
-  // reloadAllProducts — llama solo si el caché ya estaba cargado
-  // ---------------------------------------------------------------------------
   const reloadAllProducts = useCallback(async () => {
     if (!prodsRef || !storeId) return;
     try {
@@ -270,23 +241,13 @@ const ProductsView: React.FC = () => {
     }
   }, [prodsRef, storeId, mapDocToProduct]);
 
-  // ---------------------------------------------------------------------------
-  // normalize / filterLocal
-  // ---------------------------------------------------------------------------
   const normalize = (s: string) =>
-    (s || "")
-      .toLowerCase()
-      .normalize("NFD")
-      .replace(/[\u0300-\u036f]/g, "")
-      .trim();
+    (s || "").toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").trim();
 
   const filterLocal = useCallback(
     (termRaw: string) => {
       const term = normalize(termRaw);
-      if (!term) {
-        setSearchResults([]);
-        return;
-      }
+      if (!term) { setSearchResults([]); return; }
       const parts = term.split(/\s+/).filter(Boolean);
       const filtered = allProducts.filter((p) => {
         const hay = normalize(`${p.name ?? ""} ${p.sku ?? ""} ${p.description ?? ""}`);
@@ -297,73 +258,39 @@ const ProductsView: React.FC = () => {
     [allProducts]
   );
 
-  // ---------------------------------------------------------------------------
-  // Efecto de búsqueda
-  // ---------------------------------------------------------------------------
   useEffect(() => {
     if (!storeId || !prodsRef) return;
-
     const run = async () => {
-      if (!debouncedSearch) {
-        setSearchResults([]);
-        return;
-      }
-      if (!allLoaded) {
-        await loadAllProductsOnce();
-      }
+      if (!debouncedSearch) { setSearchResults([]); return; }
+      if (!allLoaded) await loadAllProductsOnce();
       filterLocal(debouncedSearch);
     };
-
     run();
   }, [debouncedSearch, storeId, prodsRef, allLoaded, loadAllProductsOnce, filterLocal]);
 
-  // ---------------------------------------------------------------------------
-  // uploadImages / uploadVideos
-  // ---------------------------------------------------------------------------
   const uploadImages = async (files: File[]): Promise<ImageItem[]> => {
     if (!storeId || !files.length) return [];
     if (uploading) return [];
-
     setUploading(true);
     setUploadProgress({ done: 0, total: files.length, currentName: "" });
-
     try {
       const optimizedFiles: File[] = [];
-
       for (const f of files) {
         const optimizedBlob = await compressImage(f);
-        const optimizedFile = new File(
-          [optimizedBlob],
-          f.name.replace(/\.\w+$/, ".jpg"),
-          { type: "image/jpeg" }
-        );
+        const optimizedFile = new File([optimizedBlob], f.name.replace(/\.\w+$/, ".jpg"), { type: "image/jpeg" });
         optimizedFiles.push(optimizedFile);
       }
-
       const uploaded = await uploadImagesToCloudinary({
         files: optimizedFiles,
         cloudName: cloudinaryConfig.cloudName,
         uploadPreset: cloudinaryConfig.uploadPreset,
         folder: `stores/${storeId}/products`,
         onFileProgress: (fileIndex, pct, fileName) => {
-          setUploadProgress({
-            done: fileIndex,
-            total: optimizedFiles.length,
-            currentName: `${fileName} (${pct}%)`,
-          });
+          setUploadProgress({ done: fileIndex, total: optimizedFiles.length, currentName: `${fileName} (${pct}%)` });
         },
       });
-
-      setUploadProgress({
-        done: optimizedFiles.length,
-        total: optimizedFiles.length,
-        currentName: "",
-      });
-
-      return uploaded.map((img) => ({
-        url: img.url,
-        publicId: img.publicId,
-      }));
+      setUploadProgress({ done: optimizedFiles.length, total: optimizedFiles.length, currentName: "" });
+      return uploaded.map((img) => ({ url: img.url, publicId: img.publicId }));
     } finally {
       setUploading(false);
     }
@@ -372,58 +299,39 @@ const ProductsView: React.FC = () => {
   const uploadVideos = async (files: File[]): Promise<VideoItem[]> => {
     if (!storeId || !files.length) return [];
     const uploaded: VideoItem[] = [];
-
     for (const f of files) {
       const err = validateVideoFile(f);
       if (err) { alert(err); continue; }
-
       const ext = (f.name.split(".").pop() || "mp4").toLowerCase();
       const filename = `${Date.now()}_${Math.random().toString(36).slice(2, 8)}.${ext}`;
       const path = `stores/${storeId}/products/videos/${filename}`;
       const storageRef = ref(storage, path);
-
-      await uploadBytes(storageRef, f, {
-        contentType: f.type || "video/mp4",
-        cacheControl: "public,max-age=31536000",
-      });
-
+      await uploadBytes(storageRef, f, { contentType: f.type || "video/mp4", cacheControl: "public,max-age=31536000" });
       const url = await getDownloadURL(storageRef);
       uploaded.push({ url, path });
     }
-
     return uploaded;
   };
 
-  // ---------------------------------------------------------------------------
-  // resetCreateForm
-  // ---------------------------------------------------------------------------
   const resetCreateForm = () => {
     if (fileInputRef.current) fileInputRef.current.value = "";
-    setName("");
-    setDescription("");
-    setPriceInput("");
-    setCategoryId("");
-    setSku("");
-    setHasDiscount(false);
-    setDiscountType("percent");
-    setDiscountValueInput("");
-    setImageFiles([]);
-    setVideoFiles([]);
-    setUseVariants(false);
-    setCreateVariants([]);
-    setIsActive(true);
+    setName(""); setDescription(""); setPriceInput(""); setCategoryId(""); setSku("");
+    setHasDiscount(false); setDiscountType("percent"); setDiscountValueInput("");
+    setImageFiles([]); setVideoFiles([]); setUseVariants(false); setCreateVariants([]); setIsActive(true);
   };
 
-  // ---------------------------------------------------------------------------
-  // loadPage — actualiza caché de módulo al terminar
-  // ---------------------------------------------------------------------------
+  // ── loadPage: ordena por `order` ASC si existe, sino por `createdAt` DESC ──
   const loadPage = useCallback(
-    async (mode: "first" | "next" | "prev", firstDoc?: QueryDocumentSnapshot<DocumentData> | null, lastDoc?: QueryDocumentSnapshot<DocumentData> | null) => {
+    async (
+      mode: "first" | "next" | "prev",
+      firstDoc?: QueryDocumentSnapshot<DocumentData> | null,
+      lastDoc?: QueryDocumentSnapshot<DocumentData> | null
+    ) => {
       if (!prodsRef || !storeId) return;
-
       setLoadingPage(true);
       try {
-        let qBase = query(prodsRef, orderBy("createdAt", "desc"));
+        // Intentamos cargar con orden personalizado primero
+        let qBase = query(prodsRef, orderBy("order", "asc"), orderBy("createdAt", "desc"));
 
         if (mode === "next" && lastDoc) {
           qBase = query(qBase, startAfter(lastDoc), limit(PAGE_SIZE + 1));
@@ -433,13 +341,22 @@ const ProductsView: React.FC = () => {
           qBase = query(qBase, limit(PAGE_SIZE + 1));
         }
 
-        const snap = await getDocs(qBase);
-        const docs = snap.docs;
+        let snap;
+        try {
+          snap = await getDocs(qBase);
+        } catch {
+          // Fallback: si el índice compuesto no existe, usamos solo createdAt
+          let fallback = query(prodsRef, orderBy("createdAt", "desc"));
+          if (mode === "next" && lastDoc) fallback = query(fallback, startAfter(lastDoc), limit(PAGE_SIZE + 1));
+          else if (mode === "prev" && firstDoc) fallback = query(fallback, endBefore(firstDoc), limitToLast(PAGE_SIZE + 1));
+          else fallback = query(fallback, limit(PAGE_SIZE + 1));
+          snap = await getDocs(fallback);
+        }
 
+        const docs = snap.docs;
         const nextExists = docs.length > PAGE_SIZE;
         const pageDocs = nextExists ? docs.slice(0, PAGE_SIZE) : docs;
         const pageProducts = pageDocs.map(mapDocToProduct);
-
         const newFirstDoc = pageDocs[0] ?? null;
         const newLastDoc = pageDocs[pageDocs.length - 1] ?? null;
 
@@ -448,14 +365,7 @@ const ProductsView: React.FC = () => {
         setPageFirstDoc(newFirstDoc);
         setPageLastDoc(newLastDoc);
 
-        // Actualizar caché de módulo
-        pageCache = {
-          storeId,
-          products: pageProducts,
-          firstDoc: newFirstDoc,
-          lastDoc: newLastDoc,
-          hasNext: nextExists,
-        };
+        pageCache = { storeId, products: pageProducts, firstDoc: newFirstDoc, lastDoc: newLastDoc, hasNext: nextExists };
       } finally {
         setLoadingPage(false);
         setLoading(false);
@@ -484,9 +394,81 @@ const ProductsView: React.FC = () => {
     await loadPage("prev", pageFirstDoc, pageLastDoc);
   }, [history, loadingPage, pageFirstDoc, pageLastDoc, loadPage]);
 
-  // ---------------------------------------------------------------------------
-  // CREATE
-  // ---------------------------------------------------------------------------
+  // ── Drag & drop handlers ─────────────────────────────────────────────────
+
+  const handleDragStart = (e: React.DragEvent<HTMLTableRowElement>, index: number) => {
+    dragNode.current = e.currentTarget;
+    setDragIndex(index);
+    e.dataTransfer.effectAllowed = "move";
+    // Pequeño delay para que el ghost se vea bien
+    setTimeout(() => {
+      if (dragNode.current) dragNode.current.style.opacity = "0.4";
+    }, 0);
+  };
+
+  const handleDragEnter = (e: React.DragEvent<HTMLTableRowElement>, index: number) => {
+    e.preventDefault();
+    if (index !== dragIndex) setDragOverIndex(index);
+  };
+
+  const handleDragOver = (e: React.DragEvent<HTMLTableRowElement>) => {
+    e.preventDefault();
+    e.dataTransfer.dropEffect = "move";
+  };
+
+  const handleDragEnd = () => {
+    if (dragNode.current) dragNode.current.style.opacity = "1";
+    setDragIndex(null);
+    setDragOverIndex(null);
+    dragNode.current = null;
+  };
+
+  const handleDrop = async (e: React.DragEvent<HTMLTableRowElement>, dropIndex: number) => {
+    e.preventDefault();
+    if (dragIndex === null || dragIndex === dropIndex || !storeId) {
+      handleDragEnd();
+      return;
+    }
+
+    // Reordenar lista local
+    const reordered = [...products];
+    const [moved] = reordered.splice(dragIndex, 1);
+    reordered.splice(dropIndex, 0, moved);
+
+    // Asignar valores de `order` basados en la posición en esta página
+    // Para páginas distintas a la 1 usamos un offset para no pisar órdenes de páginas anteriores
+    const pageOffset = (page - 1) * PAGE_SIZE;
+    const updated = reordered.map((p, i) => ({ ...p, order: pageOffset + i }));
+
+    // Actualizar estado local inmediatamente (optimista)
+    setProducts(updated);
+    if (pageCache?.storeId === storeId) pageCache.products = updated;
+
+    handleDragEnd();
+
+    // Guardar en Firestore en batch
+    setSavingOrder(true);
+    try {
+      const batch = writeBatch(db);
+      updated.forEach((p) => {
+        batch.update(doc(db, "stores", storeId, "products", p.id), {
+          order: p.order,
+          updatedAt: serverTimestamp(),
+        });
+      });
+      await batch.commit();
+    } catch (err) {
+      console.error("Error guardando orden:", err);
+      alert("No se pudo guardar el orden. Intenta de nuevo.");
+      // Revertir al orden anterior
+      await loadFirstPage();
+    } finally {
+      setSavingOrder(false);
+    }
+  };
+
+  // ── CRUD (sin cambios) ───────────────────────────────────────────────────
+
   const discountValueNum = Number((discountValueInput || "").replace(/[^\d]/g, "")) || 0;
   const basePrice = parseCOP(priceInput);
 
@@ -494,48 +476,47 @@ const ProductsView: React.FC = () => {
     e.preventDefault();
     if (!storeId || !prodsRef) return;
     if (isSubmitting) return;
-
     const cleanName = name.trim();
     const bp = parseCOP(priceInput);
     if (!cleanName || !categoryId || !bp) return;
 
+    if (!hasActiveSubscription) {
+      const countSnap = await getCountFromServer(prodsRef);
+      const total = countSnap.data().count;
+      if (total >= FREE_MAX_PRODUCTS) {
+        alert(`Has alcanzado el límite de ${FREE_MAX_PRODUCTS} productos.\nActiva tu suscripción para crear productos ilimitados.`);
+        return;
+      }
+    }
+
     setIsSubmitting(true);
     try {
-      const images = await uploadImages(imageFiles);
-      const videos = await uploadVideos(videoFiles);
+      const allowedImages = imageFiles.slice(0, maxImages);
+      const allowedVideos = videoFiles.slice(0, maxVideos);
+      if (imageFiles.length > maxImages) alert(`Solo se subirán las primeras ${maxImages} imagen(es).`);
+      if (videoFiles.length > 0 && maxVideos === 0) alert("Tu plan no permite subir videos.");
+
+      const images = await uploadImages(allowedImages);
+      const videos = await uploadVideos(allowedVideos);
       const variants = useVariants ? (createVariants || []) : [];
       const cleanSku = sku.trim() || null;
+      const discount = hasDiscount && discountValueNum > 0
+        ? { type: discountType, value: discountType === "percent" ? Math.min(100, Math.max(0, discountValueNum)) : Math.max(0, discountValueNum) }
+        : null;
 
-      const discount =
-        hasDiscount && discountValueNum > 0
-          ? {
-            type: discountType,
-            value:
-              discountType === "percent"
-                ? Math.min(100, Math.max(0, discountValueNum))
-                : Math.max(0, discountValueNum),
-          }
-          : null;
+      // El nuevo producto va al final del orden
+      const countSnap = await getCountFromServer(prodsRef);
+      const newOrder = countSnap.data().count;
 
       await addDoc(prodsRef, {
-        name: cleanName,
-        sku: cleanSku,
-        description: description.trim(),
-        price: bp,
-        discount,
-        categoryId,
-        images,
-        videos,
-        options: [],
-        variants,
-        isActive,
-        createdAt: serverTimestamp(),
-        updatedAt: serverTimestamp(),
+        name: cleanName, sku: cleanSku, description: description.trim(), price: bp, discount,
+        categoryId, images, videos, options: [], variants, isActive,
+        order: newOrder,
+        createdAt: serverTimestamp(), updatedAt: serverTimestamp(),
       });
 
       await loadFirstPage();
       if (allLoaded) await reloadAllProducts();
-
       resetCreateForm();
       setCreateVariants([]);
     } catch (err) {
@@ -546,13 +527,9 @@ const ProductsView: React.FC = () => {
     }
   };
 
-  // ---------------------------------------------------------------------------
-  // DELETE
-  // ---------------------------------------------------------------------------
   const handleDeleteProduct = async (prod: Product) => {
     if (!storeId) return;
     if (!window.confirm("¿Eliminar producto?")) return;
-
     try {
       await deleteDoc(doc(db, "stores", storeId, "products", prod.id));
       await loadFirstPage();
@@ -563,15 +540,11 @@ const ProductsView: React.FC = () => {
     }
   };
 
-  // ---------------------------------------------------------------------------
-  // OPEN EDIT
-  // ---------------------------------------------------------------------------
   const openEdit = (p: Product) => {
     setEditingProduct(p);
     setEditPriceInput(String(p.price));
     setEditUseVariants((p.variants?.length ?? 0) > 0);
     setEditSku(p.sku ?? "");
-
     if (p.discount) {
       setEditHasDiscount(true);
       setEditDiscountType(p.discount.type);
@@ -583,43 +556,25 @@ const ProductsView: React.FC = () => {
     }
   };
 
-  // ---------------------------------------------------------------------------
-  // UPDATE
-  // ---------------------------------------------------------------------------
   const handleUpdateProduct = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!storeId || !editingProduct) return;
-
     setIsSubmitting(true);
     try {
       const bp = parseCOP(editPriceInput);
       const prodRef = doc(db, "stores", storeId, "products", editingProduct.id);
       const cleanSku = editSku.trim() || null;
-
-      const discount =
-        editHasDiscount && editDiscountValueNum > 0
-          ? {
-            type: editDiscountType,
-            value:
-              editDiscountType === "percent"
-                ? Math.min(100, Math.max(0, editDiscountValueNum))
-                : Math.max(0, editDiscountValueNum),
-          }
-          : null;
+      const discount = editHasDiscount && editDiscountValueNum > 0
+        ? { type: editDiscountType, value: editDiscountType === "percent" ? Math.min(100, Math.max(0, editDiscountValueNum)) : Math.max(0, editDiscountValueNum) }
+        : null;
 
       await updateDoc(prodRef, {
-        name: editingProduct.name.trim(),
-        sku: cleanSku,
+        name: editingProduct.name.trim(), sku: cleanSku,
         description: (editingProduct.description ?? "").trim(),
-        price: bp,
-        discount,
-        categoryId: editingProduct.categoryId,
-        options: [],
+        price: bp, discount, categoryId: editingProduct.categoryId, options: [],
         variants: editUseVariants ? (editingProduct.variants ?? []) : [],
-        images: editingProduct.images ?? [],
-        videos: editingProduct.videos ?? [],
-        isActive: editingProduct.isActive ?? true,
-        updatedAt: serverTimestamp(),
+        images: editingProduct.images ?? [], videos: editingProduct.videos ?? [],
+        isActive: editingProduct.isActive ?? true, updatedAt: serverTimestamp(),
       });
 
       await loadFirstPage();
@@ -633,42 +588,36 @@ const ProductsView: React.FC = () => {
     }
   };
 
-  // ---------------------------------------------------------------------------
-  // Images / Videos en edit modal
-  // ---------------------------------------------------------------------------
   const handleAddMoreImagesToEdit = async (files: FileList | null) => {
     if (!files || !editingProduct || !storeId) return;
-    const uploaded = await uploadImages(Array.from(files));
+    const currentCount = (editingProduct.images || []).length;
+    const remaining = maxImages - currentCount;
+    if (remaining <= 0) { alert(`Ya tienes el máximo de ${maxImages} imagen(es) permitida(s).`); return; }
+    const filesToUpload = Array.from(files).slice(0, remaining);
+    if (Array.from(files).length > remaining) alert(`Solo se subirán ${remaining} imagen(es).`);
+    const uploaded = await uploadImages(filesToUpload);
     const nextImages = [...(editingProduct.images || []), ...uploaded];
-
-    await updateDoc(doc(db, "stores", storeId, "products", editingProduct.id), {
-      images: nextImages,
-      updatedAt: serverTimestamp(),
-    });
+    await updateDoc(doc(db, "stores", storeId, "products", editingProduct.id), { images: nextImages, updatedAt: serverTimestamp() });
     setEditingProduct({ ...editingProduct, images: nextImages });
   };
 
   const removeImageFromEdit = async (index: number) => {
     if (!editingProduct || !storeId) return;
     if (!window.confirm("¿Eliminar esta imagen?")) return;
-
     const next = [...(editingProduct.images || [])];
     next.splice(index, 1);
-
-    await updateDoc(doc(db, "stores", storeId, "products", editingProduct.id), {
-      images: next,
-      updatedAt: serverTimestamp(),
-    });
+    await updateDoc(doc(db, "stores", storeId, "products", editingProduct.id), { images: next, updatedAt: serverTimestamp() });
     setEditingProduct({ ...editingProduct, images: next });
   };
 
   const handleAddMoreVideosToEdit = async (files: FileList | null) => {
     if (!files || !editingProduct) return;
-    const uploaded = await uploadVideos(Array.from(files));
-    setEditingProduct({
-      ...editingProduct,
-      videos: [...((editingProduct as any).videos || []), ...uploaded],
-    } as any);
+    if (maxVideos === 0) { alert("Tu plan no permite subir videos."); return; }
+    const currentVideoCount = ((editingProduct as any).videos || []).length;
+    if (currentVideoCount >= maxVideos) { alert(`Ya tienes el máximo de ${maxVideos} video(s).`); return; }
+    const filesToUpload = Array.from(files).slice(0, maxVideos - currentVideoCount);
+    const uploaded = await uploadVideos(filesToUpload);
+    setEditingProduct({ ...editingProduct, videos: [...((editingProduct as any).videos || []), ...uploaded] } as any);
   };
 
   const removeVideoFromEdit = async (index: number) => {
@@ -677,254 +626,139 @@ const ProductsView: React.FC = () => {
     const vid = vids[index];
     if (!vid) return;
     if (!window.confirm("¿Eliminar este video?")) return;
-
-    try {
-      if (vid.path) await deleteObject(ref(storage, vid.path));
-    } catch (e) {
-      console.warn("No se pudo borrar video del storage", e);
-    }
-
+    try { if (vid.path) await deleteObject(ref(storage, vid.path)); } catch (e) { console.warn(e); }
     const next = [...vids];
     next.splice(index, 1);
     setEditingProduct({ ...(editingProduct as any), videos: next });
   };
 
-  // ---------------------------------------------------------------------------
-  // toggleProductStatus — optimista: actualiza estado local antes del write
-  // ---------------------------------------------------------------------------
   const toggleProductStatus = async (prod: Product) => {
     if (!storeId) return;
-
     const newStatus = !prod.isActive;
-
-    // Actualización optimista
-    setProducts((prev) =>
-      prev.map((p) => (p.id === prod.id ? { ...p, isActive: newStatus } : p))
-    );
+    setProducts((prev) => prev.map((p) => p.id === prod.id ? { ...p, isActive: newStatus } : p));
     if (allLoaded) {
-      const updated = allProductsCache.get(storeId)?.map((p) =>
-        p.id === prod.id ? { ...p, isActive: newStatus } : p
-      ) ?? [];
+      const updated = allProductsCache.get(storeId)?.map((p) => p.id === prod.id ? { ...p, isActive: newStatus } : p) ?? [];
       allProductsCache.set(storeId, updated);
       setAllProducts(updated);
     }
     if (pageCache?.storeId === storeId) {
-      pageCache.products = pageCache.products.map((p) =>
-        p.id === prod.id ? { ...p, isActive: newStatus } : p
-      );
+      pageCache.products = pageCache.products.map((p) => p.id === prod.id ? { ...p, isActive: newStatus } : p);
     }
-
     try {
-      await updateDoc(doc(db, "stores", storeId, "products", prod.id), {
-        isActive: newStatus,
-        updatedAt: serverTimestamp(),
-      });
+      await updateDoc(doc(db, "stores", storeId, "products", prod.id), { isActive: newStatus, updatedAt: serverTimestamp() });
     } catch (err) {
       console.error(err);
       alert("Error cambiando estado del producto");
-      // Revertir si falla
-      setProducts((prev) =>
-        prev.map((p) => (p.id === prod.id ? { ...p, isActive: prod.isActive } : p))
-      );
+      setProducts((prev) => prev.map((p) => p.id === prod.id ? { ...p, isActive: prod.isActive } : p));
     }
   };
 
-  // ---------------------------------------------------------------------------
-  // Descuentos — memos
-  // ---------------------------------------------------------------------------
   const finalPrice = useMemo(() => {
     if (!hasDiscount) return basePrice;
     if (!basePrice) return 0;
-    if (discountType === "percent") {
-      const pct = Math.min(100, Math.max(0, discountValueNum));
-      return Math.max(0, Math.round(basePrice * (1 - pct / 100)));
-    }
+    if (discountType === "percent") return Math.max(0, Math.round(basePrice * (1 - Math.min(100, Math.max(0, discountValueNum)) / 100)));
     return Math.max(0, basePrice - Math.max(0, discountValueNum));
   }, [hasDiscount, discountType, discountValueNum, basePrice]);
 
-  const savings = useMemo(() => {
-    if (!hasDiscount) return 0;
-    return Math.max(0, basePrice - finalPrice);
-  }, [hasDiscount, basePrice, finalPrice]);
+  const savings = useMemo(() => { if (!hasDiscount) return 0; return Math.max(0, basePrice - finalPrice); }, [hasDiscount, basePrice, finalPrice]);
 
   const editBasePrice = parseCOP(editPriceInput);
-  const editDiscountValueNum =
-    Number((editDiscountValueInput || "").replace(/[^\d]/g, "")) || 0;
+  const editDiscountValueNum = Number((editDiscountValueInput || "").replace(/[^\d]/g, "")) || 0;
 
   const editFinalPrice = useMemo(() => {
     if (!editHasDiscount) return editBasePrice;
     if (!editBasePrice) return 0;
-    if (editDiscountType === "percent") {
-      const pct = Math.min(100, Math.max(0, editDiscountValueNum));
-      return Math.max(0, Math.round(editBasePrice * (1 - pct / 100)));
-    }
+    if (editDiscountType === "percent") return Math.max(0, Math.round(editBasePrice * (1 - Math.min(100, Math.max(0, editDiscountValueNum)) / 100)));
     return Math.max(0, editBasePrice - Math.max(0, editDiscountValueNum));
   }, [editHasDiscount, editDiscountType, editDiscountValueNum, editBasePrice]);
 
-  const editSavings = useMemo(() => {
-    if (!editHasDiscount) return 0;
-    return Math.max(0, editBasePrice - editFinalPrice);
-  }, [editHasDiscount, editBasePrice, editFinalPrice]);
+  const editSavings = useMemo(() => { if (!editHasDiscount) return 0; return Math.max(0, editBasePrice - editFinalPrice); }, [editHasDiscount, editBasePrice, editFinalPrice]);
 
-  // ---------------------------------------------------------------------------
-  // Import helpers (sin cambios de lógica, solo movidos al final)
-  // ---------------------------------------------------------------------------
-  const normalizeText = (value: any) =>
-    String(value ?? "")
-      .trim()
-      .toLowerCase()
-      .normalize("NFD")
-      .replace(/[\u0300-\u036f]/g, "");
-
+  const normalizeText = (value: any) => String(value ?? "").trim().toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
   const parseNumberSafe = (value: any) => {
     if (typeof value === "number") return Number.isFinite(value) ? value : 0;
     const raw = String(value ?? "").trim();
     if (!raw) return 0;
-    const cleaned = raw
-      .replace(/[^\d.,-]/g, "")
-      .replace(/\.(?=\d{3}\b)/g, "")
-      .replace(",", ".");
+    const cleaned = raw.replace(/[^\d.,-]/g, "").replace(/\.(?=\d{3}\b)/g, "").replace(",", ".");
     const num = Number(cleaned);
     return Number.isFinite(num) ? num : 0;
   };
-
   const htmlToPlainText = (value: any) => {
     const str = String(value ?? "").trim();
     if (!str) return "";
     const temp = document.createElement("div");
     temp.innerHTML = str;
-    return (temp.textContent || temp.innerText || "")
-      .replace(/\n\s*\n/g, "\n")
-      .replace(/[ \t]+/g, " ")
-      .trim();
+    return (temp.textContent || temp.innerText || "").replace(/\n\s*\n/g, "\n").replace(/[ \t]+/g, " ").trim();
   };
-
   const buildDiscount = (price: number, originalRaw: any) => {
     const originalPrice = parseNumberSafe(originalRaw);
     if (!originalPrice || originalPrice <= price) return null;
     return { type: "amount" as const, value: originalPrice - price };
   };
 
-  const getOrCreateCategoryId = async (
-    categoryNameRaw: string,
-    categoryMap: Map<string, string>
-  ) => {
+  const getOrCreateCategoryId = async (categoryNameRaw: string, categoryMap: Map<string, string>) => {
     if (!storeId || !catsRef) return "";
     const categoryName = String(categoryNameRaw || "").trim();
     if (!categoryName) return "";
-
     const normalizedName = normalizeText(categoryName);
     const cachedId = categoryMap.get(normalizedName);
     if (cachedId) return cachedId;
-
     const existing = categories.find((cat) => normalizeText(cat.name) === normalizedName);
-    if (existing) {
-      categoryMap.set(normalizedName, existing.id);
-      return existing.id;
-    }
-
+    if (existing) { categoryMap.set(normalizedName, existing.id); return existing.id; }
     const snap = await getDocs(query(catsRef, orderBy("name", "asc")));
-    const dbCategories = snap.docs.map((d) => ({
-      id: d.id,
-      name: d.data().name,
-      order: d.data().order ?? 0,
-    }));
-
-    const existingInDb = dbCategories.find(
-      (cat) => normalizeText(cat.name) === normalizedName
-    );
-    if (existingInDb) {
-      categoryMap.set(normalizedName, existingInDb.id);
-      return existingInDb.id;
-    }
-
-    const maxOrder = dbCategories.length
-      ? Math.max(...dbCategories.map((c) => Number(c.order ?? 0) || 0))
-      : 0;
-
-    const newRef = await addDoc(catsRef, {
-      name: categoryName,
-      order: maxOrder + 1,
-      createdAt: serverTimestamp(),
-      updatedAt: serverTimestamp(),
-    });
-
+    const dbCategories = snap.docs.map((d) => ({ id: d.id, name: d.data().name, order: d.data().order ?? 0 }));
+    const existingInDb = dbCategories.find((cat) => normalizeText(cat.name) === normalizedName);
+    if (existingInDb) { categoryMap.set(normalizedName, existingInDb.id); return existingInDb.id; }
+    const maxOrder = dbCategories.length ? Math.max(...dbCategories.map((c) => Number(c.order ?? 0) || 0)) : 0;
+    const newRef = await addDoc(catsRef, { name: categoryName, order: maxOrder + 1, createdAt: serverTimestamp(), updatedAt: serverTimestamp() });
     categoryMap.set(normalizedName, newRef.id);
     return newRef.id;
   };
 
-  const downloadJson = (data: any, filename: string) => {
-    const json = JSON.stringify(data, null, 2);
-    const blob = new Blob([json], { type: "application/json;charset=utf-8" });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = filename;
-    document.body.appendChild(a);
-    a.click();
-    a.remove();
-    URL.revokeObjectURL(url);
-  };
-
   const handleImportJsonFile = async (file: File) => {
-    if (!storeId || !prodsRef || !catsRef) {
-      alert("La tienda aún no está lista.");
-      return;
-    }
-
+    if (!storeId || !prodsRef || !catsRef) { alert("La tienda aún no está lista."); return; }
     setIsSubmitting(true);
     try {
       const text = await file.text();
       let parsed: any;
-      try { parsed = JSON.parse(text); } catch {
-        alert("El archivo no es un JSON válido.");
-        return;
+      try { parsed = JSON.parse(text); } catch { alert("El archivo no es un JSON válido."); return; }
+      const items: ImportedJsonProduct[] = Array.isArray(parsed) ? parsed : Array.isArray(parsed?.products) ? parsed.products : [];
+      if (!items.length) { alert("No encontré productos."); return; }
+
+      if (!hasActiveSubscription) {
+        const countSnap = await getCountFromServer(prodsRef);
+        const currentTotal = countSnap.data().count;
+        const available = FREE_MAX_PRODUCTS - currentTotal;
+        if (available <= 0) { alert(`Has alcanzado el límite de ${FREE_MAX_PRODUCTS} productos.`); return; }
+        if (items.length > available) {
+          const ok = window.confirm(`Solo puedes importar ${available} más. ¿Continuar?`);
+          if (!ok) return;
+          items.splice(available);
+        }
       }
 
-      const items: ImportedJsonProduct[] = Array.isArray(parsed)
-        ? parsed
-        : Array.isArray(parsed?.products) ? parsed.products : [];
-
-      if (!items.length) {
-        alert("No encontré productos. El JSON debe ser un array o { products: [] }");
-        return;
-      }
-
-      let imported = 0;
-      let skipped = 0;
+      let imported = 0, skipped = 0;
       const categoryMap = new Map<string, string>();
+      const countSnap = await getCountFromServer(prodsRef);
+      let orderCounter = countSnap.data().count;
 
       for (const item of items) {
         const itemName = String(item.name ?? "").trim();
         const price = parseNumberSafe(item.price);
-
         if (!itemName || price <= 0) { skipped++; continue; }
-
         const catId = await getOrCreateCategoryId(item.category ?? "", categoryMap);
         const discount = buildDiscount(price, item.originalPrice ?? item.oldPrice ?? item.compareAtPrice);
-
         await addDoc(prodsRef, {
-          name: itemName,
-          sku: null,
-          description: htmlToPlainText(item.description),
-          price,
-          discount,
-          categoryId: catId,
-          images: [],
-          videos: [],
-          options: [],
-          variants: [],
-          isActive,
-          createdAt: serverTimestamp(),
-          updatedAt: serverTimestamp(),
+          name: itemName, sku: null, description: htmlToPlainText(item.description),
+          price, discount, categoryId: catId, images: [], videos: [], options: [], variants: [],
+          isActive, order: orderCounter++,
+          createdAt: serverTimestamp(), updatedAt: serverTimestamp(),
         });
-
         imported++;
       }
 
       await loadFirstPage();
       if (allLoaded) await reloadAllProducts();
-
       if (importJsonRef.current) importJsonRef.current.value = "";
       alert(`Importación completada. Importados: ${imported}. Omitidos: ${skipped}.`);
     } catch (error) {
@@ -935,243 +769,107 @@ const ProductsView: React.FC = () => {
     }
   };
 
-  const handleDeleteTodayDocs = async () => {
-    if (!storeId) return;
-    const confirm = window.confirm(
-      "⚠️ Esto borrará TODOS los productos y categorías creados hoy. ¿Continuar?"
-    );
-    if (!confirm) return;
-
-    try {
-      const start = new Date("2026-04-04T00:00:00");
-      const end = new Date("2026-04-04T23:59:59");
-
-      const prodsCol = collection(db, "stores", storeId, "products");
-      const catsCol = collection(db, "stores", storeId, "categories");
-
-      const [productsSnap, catsSnap] = await Promise.all([
-        getDocs(query(prodsCol, where("createdAt", ">=", start), where("createdAt", "<=", end))),
-        getDocs(query(catsCol, where("createdAt", ">=", start), where("createdAt", "<=", end))),
-      ]);
-
-      await Promise.all([
-        ...productsSnap.docs.map((d) => deleteDoc(d.ref)),
-        ...catsSnap.docs.map((d) => deleteDoc(d.ref)),
-      ]);
-
-      alert(`✅ Eliminados:\nProductos: ${productsSnap.size}\nCategorías: ${catsSnap.size}`);
-      await loadFirstPage();
-    } catch (err) {
-      console.error(err);
-      alert("❌ Error eliminando documentos");
-    }
-  };
-
-  // ---------------------------------------------------------------------------
-  // Guard
-  // ---------------------------------------------------------------------------
   if (!storeId) return <div className="p-8 text-center">Buscando configuración de tienda...</div>;
 
   const listToRender = search ? searchResults : products;
 
-  // ---------------------------------------------------------------------------
-  // RENDER
-  // ---------------------------------------------------------------------------
   return (
     <div className="space-y-8">
       <div className="flex justify-between items-center">
         <h1 className="text-2xl font-bold">Productos</h1>
+        {!hasActiveSubscription && (
+          <div className="flex items-center gap-2 bg-amber-50 border border-amber-200 text-amber-800 text-xs px-3 py-1.5 rounded-lg">
+            <i className="fa-solid fa-lock text-amber-500" />
+            <span>Plan pago único · máx. {FREE_MAX_PRODUCTS} · {FREE_MAX_IMAGES} img/prod · sin videos</span>
+          </div>
+        )}
       </div>
 
       <div className="flex items-center gap-2">
-        <input
-          ref={importJsonRef}
-          type="file"
-          accept="application/json,.json"
-          className="hidden"
-          onChange={(e) => {
-            const file = e.target.files?.[0];
-            if (file) handleImportJsonFile(file);
-          }}
-        />
+        <input ref={importJsonRef} type="file" accept="application/json,.json" className="hidden"
+          onChange={(e) => { const file = e.target.files?.[0]; if (file) handleImportJsonFile(file); }} />
       </div>
 
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
         {/* CREATE */}
         <div className="bg-white p-6 rounded-xl border">
           <h2 className="font-bold mb-4">Añadir Producto</h2>
-
           <form onSubmit={handleAddProduct} className="space-y-4">
-            <input
-              type="text"
-              placeholder="Nombre"
-              value={name}
-              onChange={(e) => setName(e.target.value)}
-              className="w-full p-2 border rounded"
-              required
-            />
+            <input type="text" placeholder="Nombre" value={name} onChange={(e) => setName(e.target.value)} className="w-full p-2 border rounded" required />
+            <textarea placeholder="Descripción (opcional)" value={description} onChange={(e) => setDescription(e.target.value)} className="w-full p-2 border rounded" rows={3} />
+            <input type="text" placeholder="Precio (COP) ej: 250000 o 250.000" value={priceInput} onChange={(e) => setPriceInput(e.target.value)} className="w-full p-2 border rounded" required />
 
-            <textarea
-              placeholder="Descripción (opcional)"
-              value={description}
-              onChange={(e) => setDescription(e.target.value)}
-              className="w-full p-2 border rounded"
-              rows={3}
-            />
-
-            <input
-              type="text"
-              placeholder="Precio (COP) ej: 250000 o 250.000"
-              value={priceInput}
-              onChange={(e) => setPriceInput(e.target.value)}
-              className="w-full p-2 border rounded"
-              required
-            />
-
-            {/* Descuento */}
             <div className="border rounded-lg p-3">
               <div className="flex items-center justify-between">
                 <label className="text-sm text-gray-700 font-medium">Descuento</label>
                 <div className="flex items-center gap-2">
-                  <input
-                    id="hasDiscount"
-                    type="checkbox"
-                    checked={hasDiscount}
-                    onChange={(e) => {
-                      const checked = e.target.checked;
-                      setHasDiscount(checked);
-                      if (!checked) { setDiscountValueInput(""); setDiscountType("percent"); }
-                    }}
-                  />
+                  <input id="hasDiscount" type="checkbox" checked={hasDiscount} onChange={(e) => { setHasDiscount(e.target.checked); if (!e.target.checked) { setDiscountValueInput(""); setDiscountType("percent"); } }} />
                   <label htmlFor="hasDiscount" className="text-sm text-gray-600">Activar</label>
                 </div>
               </div>
-
               {hasDiscount ? (
                 <div className="mt-3 grid grid-cols-1 sm:grid-cols-3 gap-2">
-                  <select
-                    value={discountType}
-                    onChange={(e) => setDiscountType(e.target.value as any)}
-                    className="w-full p-2 border rounded"
-                  >
+                  <select value={discountType} onChange={(e) => setDiscountType(e.target.value as any)} className="w-full p-2 border rounded">
                     <option value="percent">% Porcentaje</option>
                     <option value="amount">$ Valor (COP)</option>
                   </select>
-                  <input
-                    type="text"
-                    placeholder={discountType === "percent" ? "Ej: 10" : "Ej: 20000"}
-                    value={discountValueInput}
-                    onChange={(e) => setDiscountValueInput(e.target.value)}
-                    className="w-full p-2 border rounded sm:col-span-2"
-                  />
+                  <input type="text" placeholder={discountType === "percent" ? "Ej: 10" : "Ej: 20000"} value={discountValueInput} onChange={(e) => setDiscountValueInput(e.target.value)} className="w-full p-2 border rounded sm:col-span-2" />
                   <div className="sm:col-span-3 text-xs text-gray-500">
-                    {basePrice ? (
-                      <>
-                        <div>Precio original: <b>{formatCOP(basePrice)}</b></div>
-                        <div>
-                          Precio final: <b className="text-indigo-700">{formatCOP(finalPrice)}</b>
-                          {savings > 0 ? <> — Ahorro: <b>{formatCOP(savings)}</b></> : null}
-                        </div>
-                      </>
-                    ) : (
-                      <div>Escribe el precio para ver el cálculo del descuento.</div>
-                    )}
+                    {basePrice ? (<><div>Precio original: <b>{formatCOP(basePrice)}</b></div><div>Precio final: <b className="text-indigo-700">{formatCOP(finalPrice)}</b>{savings > 0 ? <> — Ahorro: <b>{formatCOP(savings)}</b></> : null}</div></>) : (<div>Escribe el precio para ver el cálculo.</div>)}
                   </div>
                 </div>
-              ) : (
-                <div className="mt-2 text-xs text-gray-400">
-                  Si no activas descuento, se mostrará el precio normal.
-                </div>
-              )}
+              ) : (<div className="mt-2 text-xs text-gray-400">Si no activas descuento, se mostrará el precio normal.</div>)}
             </div>
 
-            <input
-              type="text"
-              placeholder="Código / SKU (opcional)"
-              value={sku}
-              onChange={(e) => setSku(e.target.value)}
-              className="w-full p-2 border rounded"
-            />
+            <input type="text" placeholder="Código / SKU (opcional)" value={sku} onChange={(e) => setSku(e.target.value)} className="w-full p-2 border rounded" />
 
             <div className="border rounded-lg p-3">
               <div className="flex items-center justify-between">
-                <label htmlFor="isActive" className="text-sm font-medium text-gray-700">
-                  Visible en catálogo
-                </label>
+                <label htmlFor="isActive" className="text-sm font-medium text-gray-700">Visible en catálogo</label>
                 <div className="flex items-center gap-2">
-                  <input
-                    id="isActive"
-                    type="checkbox"
-                    checked={isActive}
-                    onChange={(e) => setIsActive(e.target.checked)}
-                  />
+                  <input id="isActive" type="checkbox" checked={isActive} onChange={(e) => setIsActive(e.target.checked)} />
                   <span className="text-sm text-gray-600">{isActive ? "Mostrar" : "Ocultar"}</span>
                 </div>
               </div>
-              <div className="mt-2 text-xs text-gray-400">
-                {isActive
-                  ? "Este producto se mostrará en el catálogo."
-                  : "Este producto quedará oculto en el catálogo."}
-              </div>
+              <div className="mt-2 text-xs text-gray-400">{isActive ? "Este producto se mostrará en el catálogo." : "Este producto quedará oculto en el catálogo."}</div>
             </div>
 
-            <select
-              value={categoryId}
-              onChange={(e) => setCategoryId(e.target.value)}
-              className="w-full p-2 border rounded"
-              required
-            >
+            <select value={categoryId} onChange={(e) => setCategoryId(e.target.value)} className="w-full p-2 border rounded" required>
               <option value="">Categoría</option>
-              {categories.map((cat) => (
-                <option key={cat.id} value={cat.id}>{cat.name}</option>
-              ))}
+              {categories.map((cat) => (<option key={cat.id} value={cat.id}>{cat.name}</option>))}
             </select>
 
-            <p className="text-[11px] text-gray-400">+ Agregar imágenes</p>
-            <input
-              ref={fileInputRef}
-              type="file"
-              multiple
-              onChange={(e) => setImageFiles(e.target.files ? Array.from(e.target.files) : [])}
-              className="w-full text-xs"
-            />
-
-            <p className="text-[11px] text-gray-400">Máx {MAX_VIDEO_MB}MB por video.</p>
-            <input
-              type="file"
-              multiple
-              accept="video/*"
-              onChange={(e) => setVideoFiles(e.target.files ? Array.from(e.target.files) : [])}
-              className="w-full text-xs"
-            />
-
-            <div className="flex items-center gap-2">
-              <input
-                id="useVariants"
-                type="checkbox"
-                checked={useVariants}
+            <div>
+              <p className="text-[11px] text-gray-400">+ Agregar imágenes <span className="font-medium text-gray-500">(máx. {maxImages} por producto)</span></p>
+              <input ref={fileInputRef} type="file" multiple={maxImages > 1}
                 onChange={(e) => {
-                  const checked = e.target.checked;
-                  setUseVariants(checked);
-                  if (!checked) setCreateVariants([]);
-                }}
-              />
-              <label htmlFor="useVariants" className="text-sm text-gray-700">
-                Este producto tiene variantes
-              </label>
+                  const files = e.target.files ? Array.from(e.target.files) : [];
+                  if (files.length > maxImages) { alert(`Solo puedes subir hasta ${maxImages} imagen(es).`); setImageFiles(files.slice(0, maxImages)); } else { setImageFiles(files); }
+                }} className="w-full text-xs" />
             </div>
 
-            {useVariants ? (
-              <VariantsEditor variants={createVariants} onChange={setCreateVariants} />
-            ) : null}
+            {maxVideos > 0 ? (
+              <div>
+                <p className="text-[11px] text-gray-400">Máx {MAX_VIDEO_MB}MB · máx. {maxVideos} video(s)/producto.</p>
+                <input type="file" multiple={maxVideos > 1} accept="video/*"
+                  onChange={(e) => {
+                    const files = e.target.files ? Array.from(e.target.files) : [];
+                    if (files.length > maxVideos) { alert(`Solo puedes subir hasta ${maxVideos} video(s).`); setVideoFiles(files.slice(0, maxVideos)); } else { setVideoFiles(files); }
+                  }} className="w-full text-xs" />
+              </div>
+            ) : (
+              <div className="flex items-center gap-2 bg-gray-50 border border-gray-200 rounded-lg p-2 text-xs text-gray-400">
+                <i className="fa-solid fa-lock text-gray-300" /> Videos disponibles con suscripción activa.
+              </div>
+            )}
 
-            <button
-              type="submit"
-              disabled={isSubmitting}
-              className="w-full bg-indigo-600 text-white py-2 rounded font-bold disabled:opacity-50"
-            >
-              Guardar
-            </button>
+            <div className="flex items-center gap-2">
+              <input id="useVariants" type="checkbox" checked={useVariants} onChange={(e) => { setUseVariants(e.target.checked); if (!e.target.checked) setCreateVariants([]); }} />
+              <label htmlFor="useVariants" className="text-sm text-gray-700">Este producto tiene variantes</label>
+            </div>
+            {useVariants ? (<VariantsEditor variants={createVariants} onChange={setCreateVariants} />) : null}
+
+            <button type="submit" disabled={isSubmitting} className="w-full bg-indigo-600 text-white py-2 rounded font-bold disabled:opacity-50">Guardar</button>
           </form>
         </div>
 
@@ -1179,31 +877,31 @@ const ProductsView: React.FC = () => {
         <div className="lg:col-span-2 bg-white rounded-xl border overflow-hidden">
           <div className="p-4 border-b bg-white">
             <div className="flex gap-2 items-center">
-              <input
-                value={search}
-                onChange={(e) => setSearch(e.target.value)}
-                placeholder="Buscar por nombre, SKU o descripción..."
-                className="w-full p-2 border rounded"
-              />
-              {search ? (
-                <button
-                  type="button"
-                  onClick={() => setSearch("")}
-                  className="px-3 py-2 border rounded text-sm"
-                >
-                  Limpiar
-                </button>
-              ) : null}
+              <input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Buscar por nombre, SKU o descripción..." className="w-full p-2 border rounded" />
+              {search ? (<button type="button" onClick={() => setSearch("")} className="px-3 py-2 border rounded text-sm">Limpiar</button>) : null}
             </div>
-
             {search ? (
               <div className="mt-2 text-xs text-gray-500">
-                {searching
-                  ? "Cargando productos para búsqueda..."
-                  : `Resultados: ${searchResults.length}`}
+                {searching ? "Cargando productos para búsqueda..." : `Resultados: ${searchResults.length}`}
                 {!allLoaded && !searching ? " (cargando cache...)" : ""}
               </div>
             ) : null}
+
+            {/* Indicador de guardado de orden */}
+            {savingOrder && (
+              <div className="mt-2 flex items-center gap-2 text-xs text-indigo-600">
+                <div className="w-3 h-3 border-2 border-indigo-600 border-t-transparent rounded-full animate-spin" />
+                Guardando orden...
+              </div>
+            )}
+
+            {/* Hint de drag & drop (solo cuando no se busca) */}
+            {!search && !loading && products.length > 1 && (
+              <div className="mt-2 flex items-center gap-1.5 text-xs text-gray-400">
+                <i className="fa-solid fa-grip-lines" />
+                Arrastra las filas para cambiar el orden en el catálogo
+              </div>
+            )}
           </div>
 
           {loading ? (
@@ -1213,6 +911,8 @@ const ProductsView: React.FC = () => {
               <table className="min-w-[720px] w-full text-left">
                 <thead className="bg-gray-50 text-[10px] uppercase font-bold text-gray-500">
                   <tr>
+                    {/* Columna handle drag */}
+                    {!search && <th className="px-3 py-4 w-8" />}
                     <th className="px-4 sm:px-6 py-4">Producto</th>
                     <th className="px-4 sm:px-6 py-4">Precio</th>
                     <th className="px-4 sm:px-6 py-4">Variantes</th>
@@ -1221,66 +921,66 @@ const ProductsView: React.FC = () => {
                 </thead>
 
                 <tbody className="divide-y">
-                  {listToRender.map((prod) => {
+                  {listToRender.map((prod, index) => {
                     const hasVariants = (prod.variants?.length ?? 0) > 0;
                     const displayPrice = hasVariants
                       ? `Desde ${formatCOP(Math.min(...prod.variants.map((v) => v.price || 0)))}`
                       : formatCOP(prod.price);
 
+                    const isDragging = dragIndex === index;
+                    const isOver = dragOverIndex === index;
+
                     return (
-                      <tr key={prod.id} className="text-sm">
+                      <tr
+                        key={prod.id}
+                        className={`text-sm transition-colors
+                          ${isDragging ? "bg-indigo-50" : ""}
+                          ${isOver && !isDragging ? "bg-indigo-50 border-t-2 border-indigo-400" : ""}
+                        `}
+                        draggable={!search}
+                        onDragStart={!search ? (e) => handleDragStart(e, index) : undefined}
+                        onDragEnter={!search ? (e) => handleDragEnter(e, index) : undefined}
+                        onDragOver={!search ? handleDragOver : undefined}
+                        onDragEnd={!search ? handleDragEnd : undefined}
+                        onDrop={!search ? (e) => handleDrop(e, index) : undefined}
+                      >
+                        {/* Handle */}
+                        {!search && (
+                          <td className="px-3 py-4">
+                            <div
+                              className="cursor-grab active:cursor-grabbing text-gray-300 hover:text-gray-500 flex flex-col items-center gap-0.5"
+                              title="Arrastrar para reordenar"
+                            >
+                              <i className="fa-solid fa-grip-vertical text-base" />
+                            </div>
+                          </td>
+                        )}
+
                         <td className="px-4 sm:px-6 py-4 font-medium">
                           <div className="flex items-center gap-3">
                             {prod.images?.[0]?.url ? (
-                              <img
-                                src={cldImg(prod.images[0].url, { w: 80, h: 80, crop: "fill" })}
-                                alt={prod.name}
-                                className="w-10 h-10 rounded object-cover border shrink-0"
-                                loading="lazy"
-                              />
+                              <img src={cldImg(prod.images[0].url, { w: 80, h: 80, crop: "fill" })} alt={prod.name} className="w-10 h-10 rounded object-cover border shrink-0" loading="lazy" />
                             ) : (
                               <div className="w-10 h-10 rounded bg-gray-100 border shrink-0" />
                             )}
-
                             <div className="min-w-0 flex-1">
                               <div className="font-semibold text-gray-900 truncate">{prod.name}</div>
-                              <div className="text-xs text-gray-400 line-clamp-2 sm:line-clamp-1">
-                                {prod.description || ""}
-                              </div>
+                              <div className="text-xs text-gray-400 line-clamp-2 sm:line-clamp-1">{prod.description || ""}</div>
                               {(prod.videos?.length ?? 0) > 0 ? (
-                                <div className="mt-1 text-[10px] text-gray-400">
-                                  <i className="fa-solid fa-video mr-1" />
-                                  {prod.videos!.length} video(s)
-                                </div>
+                                <div className="mt-1 text-[10px] text-gray-400"><i className="fa-solid fa-video mr-1" />{prod.videos!.length} video(s)</div>
                               ) : null}
                             </div>
                           </div>
                         </td>
 
-                        <td className="px-4 sm:px-6 py-4 font-bold text-indigo-600 whitespace-nowrap">
-                          {displayPrice}
-                        </td>
-
-                        <td className="px-4 sm:px-6 py-4 text-gray-600 whitespace-nowrap">
-                          {hasVariants ? prod.variants.length : "-"}
-                        </td>
+                        <td className="px-4 sm:px-6 py-4 font-bold text-indigo-600 whitespace-nowrap">{displayPrice}</td>
+                        <td className="px-4 sm:px-6 py-4 text-gray-600 whitespace-nowrap">{hasVariants ? prod.variants.length : "-"}</td>
 
                         <td className="px-4 sm:px-6 py-4 text-right whitespace-nowrap">
-                          <button
-                            onClick={() => openEdit(prod)}
-                            className="inline-flex items-center justify-center w-10 h-10 rounded-lg border border-gray-200 text-gray-500 hover:text-indigo-600 hover:border-indigo-200 hover:bg-indigo-50"
-                            title="Editar"
-                            type="button"
-                          >
+                          <button onClick={() => openEdit(prod)} className="inline-flex items-center justify-center w-10 h-10 rounded-lg border border-gray-200 text-gray-500 hover:text-indigo-600 hover:border-indigo-200 hover:bg-indigo-50" title="Editar" type="button">
                             <i className="fa-solid fa-pen" />
                           </button>
-
-                          <button
-                            onClick={() => handleDeleteProduct(prod)}
-                            className="ml-2 inline-flex items-center justify-center w-10 h-10 rounded-lg border border-gray-200 text-gray-500 hover:text-red-600 hover:border-red-200 hover:bg-red-50"
-                            title="Eliminar"
-                            type="button"
-                          >
+                          <button onClick={() => handleDeleteProduct(prod)} className="ml-2 inline-flex items-center justify-center w-10 h-10 rounded-lg border border-gray-200 text-gray-500 hover:text-red-600 hover:border-red-200 hover:bg-red-50" title="Eliminar" type="button">
                             <i className="fa-solid fa-trash-can" />
                           </button>
                         </td>
@@ -1290,23 +990,14 @@ const ProductsView: React.FC = () => {
 
                   {!products.length ? (
                     <tr>
-                      <td className="px-6 py-8 text-gray-400" colSpan={4}>
-                        Aún no hay productos.
-                      </td>
+                      <td className="px-6 py-8 text-gray-400" colSpan={search ? 4 : 5}>Aún no hay productos.</td>
                     </tr>
                   ) : null}
                 </tbody>
               </table>
 
               {!search ? (
-                <Paginator
-                  page={page}
-                  hasNext={hasNext}
-                  hasPrev={history.length > 0}
-                  loading={loadingPage}
-                  onNext={goNext}
-                  onPrev={goPrev}
-                />
+                <Paginator page={page} hasNext={hasNext} hasPrev={history.length > 0} loading={loadingPage} onNext={goNext} onPrev={goPrev} />
               ) : null}
             </div>
           )}
@@ -1321,260 +1012,116 @@ const ProductsView: React.FC = () => {
               <h3 className="text-xl font-bold">Editar Producto</h3>
               <button onClick={() => setEditingProduct(null)} className="text-gray-500">✕</button>
             </div>
-
             <form onSubmit={handleUpdateProduct} className="space-y-6">
               <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                 <div>
                   <label className="text-xs text-gray-500">Nombre</label>
-                  <input
-                    type="text"
-                    value={editingProduct.name}
-                    onChange={(e) => setEditingProduct({ ...editingProduct, name: e.target.value })}
-                    className="w-full p-2 border rounded"
-                  />
+                  <input type="text" value={editingProduct.name} onChange={(e) => setEditingProduct({ ...editingProduct, name: e.target.value })} className="w-full p-2 border rounded" />
                 </div>
-
                 <div>
                   <label className="text-xs text-gray-500">Precio base (COP)</label>
-                  <input
-                    type="text"
-                    value={editPriceInput}
-                    onChange={(e) => setEditPriceInput(e.target.value)}
-                    className="w-full p-2 border rounded"
-                  />
-                  <div className="text-xs text-gray-400 mt-1">
-                    Preview: {formatCOP(parseCOP(editPriceInput))}
-                  </div>
+                  <input type="text" value={editPriceInput} onChange={(e) => setEditPriceInput(e.target.value)} className="w-full p-2 border rounded" />
+                  <div className="text-xs text-gray-400 mt-1">Preview: {formatCOP(parseCOP(editPriceInput))}</div>
                 </div>
-
                 <div>
                   <label className="text-xs text-gray-500">Código / SKU</label>
-                  <input
-                    type="text"
-                    value={editSku}
-                    onChange={(e) => setEditSku(e.target.value)}
-                    className="w-full p-2 border rounded"
-                    placeholder="Opcional"
-                  />
+                  <input type="text" value={editSku} onChange={(e) => setEditSku(e.target.value)} className="w-full p-2 border rounded" placeholder="Opcional" />
                 </div>
-
                 <div className="border rounded-lg p-4 space-y-3">
                   <div className="flex items-center justify-between">
                     <label className="text-sm font-medium text-gray-700">Descuento</label>
                     <div className="flex items-center gap-2">
-                      <input
-                        type="checkbox"
-                        checked={editHasDiscount}
-                        onChange={(e) => {
-                          const checked = e.target.checked;
-                          setEditHasDiscount(checked);
-                          if (!checked) { setEditDiscountValueInput(""); setEditDiscountType("percent"); }
-                        }}
-                      />
+                      <input type="checkbox" checked={editHasDiscount} onChange={(e) => { setEditHasDiscount(e.target.checked); if (!e.target.checked) { setEditDiscountValueInput(""); setEditDiscountType("percent"); } }} />
                       <span className="text-sm text-gray-600">Activar</span>
                     </div>
                   </div>
-
                   {editHasDiscount ? (
                     <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
-                      <select
-                        value={editDiscountType}
-                        onChange={(e) => setEditDiscountType(e.target.value as any)}
-                        className="p-2 border rounded"
-                      >
+                      <select value={editDiscountType} onChange={(e) => setEditDiscountType(e.target.value as any)} className="p-2 border rounded">
                         <option value="percent">% Porcentaje</option>
                         <option value="amount">$ Valor (COP)</option>
                       </select>
-                      <input
-                        type="text"
-                        value={editDiscountValueInput}
-                        onChange={(e) => setEditDiscountValueInput(e.target.value)}
-                        placeholder={editDiscountType === "percent" ? "Ej: 10" : "Ej: 20000"}
-                        className="p-2 border rounded sm:col-span-2"
-                      />
+                      <input type="text" value={editDiscountValueInput} onChange={(e) => setEditDiscountValueInput(e.target.value)} placeholder={editDiscountType === "percent" ? "Ej: 10" : "Ej: 20000"} className="p-2 border rounded sm:col-span-2" />
                       <div className="sm:col-span-3 text-xs text-gray-500">
-                        {editBasePrice ? (
-                          <>
-                            <div>Precio original: <b>{formatCOP(editBasePrice)}</b></div>
-                            <div>
-                              Precio final: <b className="text-indigo-700">{formatCOP(editFinalPrice)}</b>
-                              {editSavings > 0 && <> — Ahorro: <b>{formatCOP(editSavings)}</b></>}
-                            </div>
-                          </>
-                        ) : (
-                          <div>Escribe el precio para calcular el descuento.</div>
-                        )}
+                        {editBasePrice ? (<><div>Precio original: <b>{formatCOP(editBasePrice)}</b></div><div>Precio final: <b className="text-indigo-700">{formatCOP(editFinalPrice)}</b>{editSavings > 0 && <> — Ahorro: <b>{formatCOP(editSavings)}</b></>}</div></>) : (<div>Escribe el precio para calcular.</div>)}
                       </div>
                     </div>
-                  ) : (
-                    <div className="text-xs text-gray-400">Sin descuento, se mostrará el precio normal.</div>
-                  )}
+                  ) : (<div className="text-xs text-gray-400">Sin descuento.</div>)}
                 </div>
-
                 <div className="md:col-span-2">
                   <label className="text-xs text-gray-500">Descripción</label>
-                  <textarea
-                    rows={3}
-                    value={editingProduct.description || ""}
-                    onChange={(e) => setEditingProduct({ ...editingProduct, description: e.target.value })}
-                    className="w-full p-2 border rounded"
-                  />
+                  <textarea rows={3} value={editingProduct.description || ""} onChange={(e) => setEditingProduct({ ...editingProduct, description: e.target.value })} className="w-full p-2 border rounded" />
                 </div>
-
                 <div className="border rounded-lg p-4 space-y-2 md:col-span-2">
                   <div className="flex items-center justify-between">
                     <label className="text-sm font-medium text-gray-700">Visible en catálogo</label>
                     <div className="flex items-center gap-2">
-                      <input
-                        type="checkbox"
-                        checked={editingProduct.isActive ?? true}
-                        onChange={(e) => setEditingProduct({ ...editingProduct, isActive: e.target.checked })}
-                      />
-                      <span className="text-sm text-gray-600">
-                        {(editingProduct.isActive ?? true) ? "Mostrar" : "Ocultar"}
-                      </span>
+                      <input type="checkbox" checked={editingProduct.isActive ?? true} onChange={(e) => setEditingProduct({ ...editingProduct, isActive: e.target.checked })} />
+                      <span className="text-sm text-gray-600">{(editingProduct.isActive ?? true) ? "Mostrar" : "Ocultar"}</span>
                     </div>
                   </div>
-                  <div className="text-xs text-gray-400">
-                    {(editingProduct.isActive ?? true)
-                      ? "Este producto se mostrará en el catálogo."
-                      : "Este producto quedará oculto en el catálogo."}
-                  </div>
+                  <div className="text-xs text-gray-400">{(editingProduct.isActive ?? true) ? "Este producto se mostrará en el catálogo." : "Este producto quedará oculto."}</div>
                 </div>
-
                 <div className="md:col-span-2">
                   <label className="text-xs text-gray-500">Categoría</label>
-                  <select
-                    value={editingProduct.categoryId}
-                    onChange={(e) => setEditingProduct({ ...editingProduct, categoryId: e.target.value })}
-                    className="w-full p-2 border rounded"
-                  >
+                  <select value={editingProduct.categoryId} onChange={(e) => setEditingProduct({ ...editingProduct, categoryId: e.target.value })} className="w-full p-2 border rounded">
                     <option value="">Categoría</option>
-                    {categories.map((cat) => (
-                      <option key={cat.id} value={cat.id}>{cat.name}</option>
-                    ))}
+                    {categories.map((cat) => (<option key={cat.id} value={cat.id}>{cat.name}</option>))}
                   </select>
                 </div>
               </div>
 
-              {/* Images */}
               <div className="border rounded p-4">
                 <div className="flex items-center justify-between">
-                  <h4 className="font-bold">Imágenes</h4>
-                  <label className="text-sm text-indigo-600 cursor-pointer">
-                    + Agregar imágenes
-                    <input
-                      type="file"
-                      multiple
-                      className="hidden"
-                      onChange={(e) => handleAddMoreImagesToEdit(e.target.files)}
-                    />
-                  </label>
+                  <h4 className="font-bold">Imágenes <span className="text-xs font-normal text-gray-400">({(editingProduct.images || []).length}/{maxImages})</span></h4>
+                  {(editingProduct.images || []).length < maxImages ? (
+                    <label className="text-sm text-indigo-600 cursor-pointer">+ Agregar imágenes<input type="file" multiple={maxImages > 1} className="hidden" onChange={(e) => handleAddMoreImagesToEdit(e.target.files)} /></label>
+                  ) : (<span className="text-xs text-amber-600">Límite alcanzado ({maxImages}/{maxImages})</span>)}
                 </div>
-
                 <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mt-3">
                   {(editingProduct.images || []).map((img, idx) => (
                     <div key={img.path || img.url} className="relative">
-                      <img
-                        src={cldImg(img.url, { w: 240, h: 240, crop: "fill" })}
-                        alt="img"
-                        className="w-full h-auto object-cover rounded border"
-                        loading="lazy"
-                        decoding="async"
-                      />
-                      <button
-                        type="button"
-                        onClick={() => removeImageFromEdit(idx)}
-                        className="absolute top-1 right-1 bg-white/90 border rounded px-2 py-1 text-xs"
-                        title="Eliminar"
-                      >
-                        ✕
-                      </button>
+                      <img src={cldImg(img.url, { w: 240, h: 240, crop: "fill" })} alt="img" className="w-full h-auto object-cover rounded border" loading="lazy" decoding="async" />
+                      <button type="button" onClick={() => removeImageFromEdit(idx)} className="absolute top-1 right-1 bg-white/90 border rounded px-2 py-1 text-xs" title="Eliminar">✕</button>
                     </div>
                   ))}
-                  {!editingProduct.images?.length ? (
-                    <div className="text-sm text-gray-400">Sin imágenes</div>
-                  ) : null}
+                  {!editingProduct.images?.length ? (<div className="text-sm text-gray-400">Sin imágenes</div>) : null}
                 </div>
               </div>
 
-              {/* Videos */}
               <div className="border rounded p-4">
                 <div className="flex items-center justify-between">
-                  <h4 className="font-bold">Videos</h4>
-                  <label className="text-sm text-indigo-600 cursor-pointer">
-                    + Agregar videos
-                    <input
-                      type="file"
-                      multiple
-                      accept="video/*"
-                      className="hidden"
-                      onChange={(e) => handleAddMoreVideosToEdit(e.target.files)}
-                    />
-                  </label>
+                  <h4 className="font-bold">Videos <span className="text-xs font-normal text-gray-400">({((editingProduct as any).videos || []).length}/{maxVideos})</span></h4>
+                  {maxVideos > 0 && ((editingProduct as any).videos || []).length < maxVideos ? (
+                    <label className="text-sm text-indigo-600 cursor-pointer">+ Agregar videos<input type="file" multiple={maxVideos > 1} accept="video/*" className="hidden" onChange={(e) => handleAddMoreVideosToEdit(e.target.files)} /></label>
+                  ) : maxVideos === 0 ? (
+                    <span className="text-xs text-gray-400 flex items-center gap-1"><i className="fa-solid fa-lock" /> Requiere suscripción</span>
+                  ) : (
+                    <span className="text-xs text-amber-600">Límite alcanzado</span>
+                  )}
                 </div>
-
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-3 mt-3">
-                  {(editingProduct.videos || []).map((v, idx) => (
+                  {((editingProduct as any).videos || []).map((v: VideoItem, idx: number) => (
                     <div key={v.path || v.url} className="relative border rounded-xl overflow-hidden bg-black">
                       <video src={v.url} controls className="w-full h-44 object-contain" />
-                      <button
-                        type="button"
-                        onClick={() => removeVideoFromEdit(idx)}
-                        className="absolute top-2 right-2 bg-white/90 border rounded px-2 py-1 text-xs"
-                        title="Eliminar"
-                      >
-                        ✕
-                      </button>
+                      <button type="button" onClick={() => removeVideoFromEdit(idx)} className="absolute top-2 right-2 bg-white/90 border rounded px-2 py-1 text-xs" title="Eliminar">✕</button>
                     </div>
                   ))}
-                  {!(editingProduct.videos || []).length ? (
-                    <div className="text-sm text-gray-400">Sin videos</div>
-                  ) : null}
+                  {!((editingProduct as any).videos || []).length ? (<div className="text-sm text-gray-400">{maxVideos === 0 ? "Videos no disponibles en el plan pago único." : "Sin videos"}</div>) : null}
                 </div>
               </div>
 
-              {/* Variants */}
               <div className="border rounded p-4 space-y-4">
                 <div className="flex items-center gap-2">
-                  <input
-                    id="editUseVariants"
-                    type="checkbox"
-                    checked={editUseVariants}
-                    onChange={(e) => {
-                      const checked = e.target.checked;
-                      setEditUseVariants(checked);
-                      if (!checked) setEditingProduct({ ...editingProduct, variants: [] });
-                    }}
-                  />
-                  <label htmlFor="editUseVariants" className="text-sm text-gray-700">
-                    Este producto tiene variantes
-                  </label>
+                  <input id="editUseVariants" type="checkbox" checked={editUseVariants} onChange={(e) => { setEditUseVariants(e.target.checked); if (!e.target.checked) setEditingProduct({ ...editingProduct, variants: [] }); }} />
+                  <label htmlFor="editUseVariants" className="text-sm text-gray-700">Este producto tiene variantes</label>
                 </div>
-
-                {editUseVariants ? (
-                  <VariantsEditor
-                    variants={editingProduct.variants || []}
-                    onChange={(vars) => setEditingProduct({ ...editingProduct, variants: vars })}
-                  />
-                ) : null}
+                {editUseVariants ? (<VariantsEditor variants={editingProduct.variants || []} onChange={(vars) => setEditingProduct({ ...editingProduct, variants: vars })} />) : null}
               </div>
 
               <div className="flex gap-2">
-                <button
-                  type="button"
-                  onClick={() => setEditingProduct(null)}
-                  className="flex-1 bg-gray-100 py-2 rounded"
-                >
-                  Cancelar
-                </button>
-                <button
-                  type="submit"
-                  disabled={isSubmitting}
-                  className="flex-1 bg-indigo-600 text-white py-2 rounded font-bold disabled:opacity-50"
-                >
-                  Guardar cambios
-                </button>
+                <button type="button" onClick={() => setEditingProduct(null)} className="flex-1 bg-gray-100 py-2 rounded">Cancelar</button>
+                <button type="submit" disabled={isSubmitting} className="flex-1 bg-indigo-600 text-white py-2 rounded font-bold disabled:opacity-50">Guardar cambios</button>
               </div>
             </form>
           </div>
@@ -1591,23 +1138,11 @@ const ProductsView: React.FC = () => {
                 <div className="text-xs text-gray-500">{uploadProgress.currentName}</div>
               </div>
             </div>
-            <div className="mt-4 text-xs text-gray-600">
-              {uploadProgress.done}/{uploadProgress.total}
-            </div>
+            <div className="mt-4 text-xs text-gray-600">{uploadProgress.done}/{uploadProgress.total}</div>
             <div className="mt-2 h-2 bg-gray-100 rounded-full overflow-hidden">
-              <div
-                className="h-full bg-indigo-600"
-                style={{
-                  width:
-                    uploadProgress.total > 0
-                      ? `${Math.round((uploadProgress.done / uploadProgress.total) * 100)}%`
-                      : "0%",
-                }}
-              />
+              <div className="h-full bg-indigo-600" style={{ width: uploadProgress.total > 0 ? `${Math.round((uploadProgress.done / uploadProgress.total) * 100)}%` : "0%" }} />
             </div>
-            <div className="mt-3 text-[11px] text-gray-400">
-              No cierres esta ventana mientras se suben los archivos.
-            </div>
+            <div className="mt-3 text-[11px] text-gray-400">No cierres esta ventana mientras se suben los archivos.</div>
           </div>
         </div>
       )}

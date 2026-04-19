@@ -1,16 +1,86 @@
-import React, { useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import { Outlet, Link, useNavigate } from 'react-router-dom';
 import { signOut } from 'firebase/auth';
-import { auth } from '../../lib/firebase';
+import { collection, getDocs, limit, query, where } from 'firebase/firestore';
+
+import { auth, db } from '../../lib/firebase';
 import { useAuth } from '../../context/AuthContext';
 import Sidebar from '../admin/Sidebar';
-import { collection, getDocs, query, where, limit } from "firebase/firestore";
-import { db } from "../../lib/firebase";
+
+type StoreInfo = {
+  id: string;
+  slug: string;
+  name: string;
+  hasActiveSubscription: boolean;
+};
 
 const AdminLayout: React.FC = () => {
   const { user } = useAuth();
   const navigate = useNavigate();
+
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
+  const [storeInfo, setStoreInfo] = useState<StoreInfo | null>(null);
+  const [loadingStore, setLoadingStore] = useState(true);
+
+  useEffect(() => {
+    let isMounted = true;
+
+    const loadStore = async () => {
+      try {
+        if (!user?.uid) {
+          if (isMounted) {
+            setStoreInfo(null);
+            setLoadingStore(false);
+          }
+          return;
+        }
+
+        setLoadingStore(true);
+
+        const qStore = query(
+          collection(db, 'stores'),
+          where('ownerUid', '==', user.uid),
+          limit(1)
+        );
+
+        const snap = await getDocs(qStore);
+
+        if (!isMounted) return;
+
+        if (snap.empty) {
+          setStoreInfo(null);
+          setLoadingStore(false);
+          return;
+        }
+
+        const doc = snap.docs[0];
+        const data = doc.data() as any;
+
+        setStoreInfo({
+          id: doc.id,
+          slug: typeof data.slug === 'string' ? data.slug : '',
+          name: typeof data.name === 'string' ? data.name : '',
+          hasActiveSubscription: data.hasActiveSubscription === true,
+        });
+      } catch (error) {
+        console.error('Error cargando la tienda:', error);
+
+        if (isMounted) {
+          setStoreInfo(null);
+        }
+      } finally {
+        if (isMounted) {
+          setLoadingStore(false);
+        }
+      }
+    };
+
+    loadStore();
+
+    return () => {
+      isMounted = false;
+    };
+  }, [user?.uid]);
 
   const handleLogout = async () => {
     try {
@@ -21,46 +91,36 @@ const AdminLayout: React.FC = () => {
     }
   };
 
-  const initials = user?.email?.substring(0, 2).toUpperCase() || 'AD';
+  const initials = useMemo(() => {
+    return user?.email?.substring(0, 2).toUpperCase() || 'AD';
+  }, [user?.email]);
 
-  const openMyCatalog = async () => {
+  const openMyCatalog = () => {
     try {
-      if (!user) return;
+      if (loadingStore) return;
 
-      const qStore = query(
-        collection(db, "stores"),
-        where("ownerUid", "==", user.uid),
-        limit(1)
-      );
-
-      const snap = await getDocs(qStore);
-      if (snap.empty) {
-        alert("No se encontró una tienda para este usuario.");
+      if (!storeInfo) {
+        alert('No se encontró una tienda para este usuario.');
         return;
       }
 
-      const storeData = snap.docs[0].data() as any;
-      const storeSlug = storeData.slug as string | undefined;
-
-      if (!storeSlug) {
-        alert("Tu tienda no tiene slug configurado.");
+      if (!storeInfo.slug) {
+        alert('Tu tienda no tiene slug configurado.');
         return;
       }
 
-      window.open(`/#/${storeSlug}`, "_blank", "noopener,noreferrer");
+      window.open(`/#/${storeInfo.slug}`, '_blank', 'noopener,noreferrer');
     } catch (err) {
       console.error(err);
-      alert("No se pudo abrir el catálogo.");
+      alert('No se pudo abrir el catálogo.');
     }
   };
 
   return (
     <div className="min-h-screen bg-gray-50 flex flex-col">
-      {/* Header Admin */}
       <header className="bg-white border-b border-gray-200 sticky top-0 z-40">
         <div className="max-w-full mx-auto px-4 sm:px-6 lg:px-8 h-16 flex items-center justify-between">
           <div className="flex items-center gap-3">
-            {/* HAMBURGUESA (solo móvil) */}
             <button
               className="md:hidden p-2 rounded-lg hover:bg-gray-100 text-gray-700"
               onClick={() => setMobileMenuOpen(true)}
@@ -82,7 +142,8 @@ const AdminLayout: React.FC = () => {
           <div className="flex items-center gap-6">
             <button
               onClick={openMyCatalog}
-              className="hidden sm:flex items-center gap-2 text-sm text-gray-500 hover:text-indigo-600 transition-colors"
+              disabled={loadingStore}
+              className="hidden sm:flex items-center gap-2 text-sm text-gray-500 hover:text-indigo-600 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
             >
               <i className="fa-solid fa-arrow-up-right-from-square text-xs"></i>
               Ver Catálogo
@@ -92,7 +153,9 @@ const AdminLayout: React.FC = () => {
 
             <div className="flex items-center gap-4">
               <div className="flex flex-col items-end hidden lg:flex">
-                <p className="text-sm font-semibold text-gray-900 leading-none">Administrador</p>
+                <p className="text-sm font-semibold text-gray-900 leading-none">
+                  Administrador
+                </p>
                 <p className="text-xs text-gray-500 mt-1">{user?.email}</p>
               </div>
 
@@ -115,12 +178,14 @@ const AdminLayout: React.FC = () => {
       </header>
 
       <div className="flex flex-1">
-        {/* Sidebar fijo (desktop) */}
         <aside className="hidden md:flex sticky top-16 h-[calc(100vh-64px)]">
-          <Sidebar />
+          <Sidebar
+            hasActiveSubscription={storeInfo?.hasActiveSubscription ?? false}
+            storeName={storeInfo?.name}
+            storeId={storeInfo?.id}
+          />
         </aside>
 
-        {/* Main */}
         <main className="flex-1 overflow-x-hidden">
           <div className="p-6 md:p-8">
             <div className="max-w-6xl mx-auto">
@@ -130,17 +195,14 @@ const AdminLayout: React.FC = () => {
         </main>
       </div>
 
-      {/* Drawer (móvil) */}
       {mobileMenuOpen && (
         <div className="fixed inset-0 z-50 md:hidden">
-          {/* Overlay */}
           <button
             className="absolute inset-0 bg-black/40"
             onClick={() => setMobileMenuOpen(false)}
             aria-label="Cerrar menú"
           />
 
-          {/* Panel */}
           <div className="absolute left-0 top-0 h-full w-72 bg-white shadow-xl">
             <div className="h-16 flex items-center justify-between px-4 border-b border-gray-200">
               <span className="font-bold text-gray-900">Menú</span>
@@ -153,7 +215,12 @@ const AdminLayout: React.FC = () => {
               </button>
             </div>
 
-            <Sidebar onNavigate={() => setMobileMenuOpen(false)} />
+            <Sidebar
+              onNavigate={() => setMobileMenuOpen(false)}
+              hasActiveSubscription={storeInfo?.hasActiveSubscription}
+              storeName={storeInfo?.name}
+              storeId={storeInfo?.id}
+            />
           </div>
         </div>
       )}

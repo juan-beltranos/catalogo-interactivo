@@ -10,7 +10,7 @@ function slugify(input: string) {
         .toLowerCase()
         .trim()
         .normalize("NFD")
-        .replace(/[\u0300-\u036f]/g, "") // quita acentos
+        .replace(/[\u0300-\u036f]/g, "")
         .replace(/[^a-z0-9]+/g, "-")
         .replace(/(^-|-$)+/g, "");
 }
@@ -27,7 +27,7 @@ const RegisterView: React.FC = () => {
     // Negocio / tienda
     const [storeName, setStoreName] = useState("");
     const [storeSlug, setStoreSlug] = useState("");
-    const [whatsapp, setWhatsapp] = useState(""); // ej: 573001112233
+    const [whatsapp, setWhatsapp] = useState("");
     const [address, setAddress] = useState("");
 
     const [error, setError] = useState("");
@@ -69,7 +69,6 @@ const RegisterView: React.FC = () => {
             await updateProfile(cred.user, { displayName: cleanAdminName });
 
             // 2) Crear store en Firestore
-            // Recomendado: stores como colección raíz (y luego subcolecciones por store)
             const storesRef = collection(db, "stores");
             const storeDoc = await addDoc(storesRef, {
                 name: cleanStoreName,
@@ -78,16 +77,15 @@ const RegisterView: React.FC = () => {
                 address: address.trim() || "",
                 ownerUid: cred.user.uid,
                 isActive: true,
+
+                // Suscripción
+                subscriptionType: "one_time",
+                hasActiveSubscription: false,
+
                 createdAt: serverTimestamp(),
                 updatedAt: serverTimestamp(),
             });
 
-            // 3) (Opcional) Crear perfil de usuario en /users
-            // Esto ayuda después (multi-store, roles, etc.)
-            // await setDoc(doc(db, "users", cred.user.uid), { ... })
-
-            // 4) Redirigir al admin
-            // Puedes guardar storeId en localStorage si tu app lo necesita
             localStorage.setItem("activeStoreId", storeDoc.id);
 
             navigate("/admin", { replace: true });
@@ -99,8 +97,6 @@ const RegisterView: React.FC = () => {
             else if (code === "auth/invalid-email") setError("El correo no es válido.");
             else if (code === "auth/weak-password") setError("Contraseña muy débil (mínimo 6).");
             else {
-                // Importante: slug duplicado NO lo detecta Firestore por sí solo.
-                // Eso lo resolvemos en el siguiente paso con validación previa o reglas.
                 setError("No se pudo crear la cuenta/tienda. Revisa los datos e intenta de nuevo.");
             }
         } finally {
