@@ -19,6 +19,7 @@ import { useAuth } from "@/context/AuthContext";
 const CategoriesView: React.FC = () => {
   const { user } = useAuth();
   const [storeId, setStoreId] = useState<string | null>(null);
+  const [storeSlug, setStoreSlug] = useState<string>("");
 
   const [categories, setCategories] = useState<Category[]>([]);
   const [loading, setLoading] = useState(true);
@@ -41,11 +42,17 @@ const CategoriesView: React.FC = () => {
         const snap = await getDocs(q);
 
         if (!snap.empty) {
-          setStoreId(snap.docs[0].id);
+          const storeDoc = snap.docs[0];
+          const storeData = storeDoc.data() as any;
+
+          setStoreId(storeDoc.id);
+          setStoreSlug(storeData.slug || "");
         } else {
           setStoreId(null);
+          setStoreSlug("");
           setError("No se encontró tienda para este usuario.");
         }
+
       } catch (e) {
         console.error(e);
         setError("Error buscando tienda del usuario.");
@@ -61,6 +68,69 @@ const CategoriesView: React.FC = () => {
     if (!storeId) return null;
     return collection(db, "stores", storeId, "categories");
   }, [storeId]);
+
+  const getCategoryUrl = (category: Category) => {
+    if (!storeSlug) return "";
+    return `${window.location.origin}/#/${storeSlug}?category=${encodeURIComponent(category.id)}`;
+  };
+
+  const copyCategoryUrl = async (category: Category) => {
+    const url = getCategoryUrl(category);
+
+    if (!url) {
+      setError("No se pudo generar el link porque la tienda no tiene slug.");
+      return;
+    }
+
+    try {
+      await navigator.clipboard.writeText(url);
+      alert("Link de categoría copiado al portapapeles.");
+    } catch (err) {
+      console.error(err);
+      setError("No se pudo copiar el link.");
+    }
+  };
+
+  const shareCategoryOnWhatsApp = (category: Category) => {
+    const url = getCategoryUrl(category);
+
+    if (!url) {
+      setError("No se pudo generar el link porque la tienda no tiene slug.");
+      return;
+    }
+
+    const text = `Mira esta categoría: ${category.name}\n${url}`;
+    const whatsappUrl = `https://wa.me/?text=${encodeURIComponent(text)}`;
+
+    window.open(whatsappUrl, "_blank", "noopener,noreferrer");
+  };
+
+  const shareCategory = async (category: Category) => {
+    const url = getCategoryUrl(category);
+
+    if (!url) {
+      setError("No se pudo generar el link porque la tienda no tiene slug.");
+      return;
+    }
+
+    const shareData = {
+      title: `Categoría: ${category.name}`,
+      text: `Mira esta categoría del catálogo: ${category.name}`,
+      url,
+    };
+
+    try {
+      if (navigator.share) {
+        await navigator.share(shareData);
+        return;
+      }
+
+      await navigator.clipboard.writeText(url);
+      alert("Tu navegador no soporta compartir directo. Se copió el link al portapapeles.");
+    } catch (err) {
+      console.error(err);
+    }
+  };
 
   useEffect(() => {
     if (!categoriesRef) return;
@@ -213,46 +283,77 @@ const CategoriesView: React.FC = () => {
               <i className="fa-solid fa-circle-notch animate-spin text-indigo-600 text-2xl"></i>
             </div>
           ) : (
-            <table className="w-full text-left">
-              <thead>
-                <tr className="bg-gray-50 text-gray-500 text-xs uppercase tracking-wider">
-                  <th className="px-6 py-3 font-semibold">Orden</th>
-                  <th className="px-6 py-3 font-semibold">Nombre</th>
-                  <th className="px-6 py-3 font-semibold text-right">Acciones</th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-gray-100">
-                {categories.map((cat) => (
-                  <tr key={cat.id} className="hover:bg-gray-50 transition-colors">
-                    <td className="px-6 py-4 text-sm text-gray-500">#{cat.order}</td>
-                    <td className="px-6 py-4 text-sm font-medium text-gray-900">{cat.name}</td>
-                    <td className="px-6 py-4 text-right flex justify-end gap-2">
-                      <button
-                        onClick={() => setEditingCategory(cat)}
-                        className="text-gray-400 hover:text-indigo-600 p-2"
-                        title="Editar"
-                      >
-                        <i className="fa-solid fa-pen-to-square"></i>
-                      </button>
-                      <button
-                        onClick={() => handleDeleteCategory(cat.id)}
-                        className="text-gray-400 hover:text-red-600 p-2"
-                        title="Eliminar"
-                      >
-                        <i className="fa-solid fa-trash-can"></i>
-                      </button>
-                    </td>
-                  </tr>
-                ))}
-                {!categories.length ? (
-                  <tr>
-                    <td className="px-6 py-6 text-sm text-gray-400" colSpan={3}>
-                      Aún no hay categorías.
-                    </td>
-                  </tr>
-                ) : null}
-              </tbody>
-            </table>
+            <div className="bg-white rounded-xl shadow-sm border border-gray-100 overflow-hidden">
+              <div className="w-full overflow-x-auto">
+                <table className="min-w-[720px] w-full divide-y divide-gray-200">
+                  <thead>
+                    <tr className="bg-gray-50 text-gray-500 text-xs uppercase tracking-wider">
+                      <th className="px-6 py-3 font-semibold">Orden</th>
+                      <th className="px-6 py-3 font-semibold">Nombre</th>
+                      <th className="px-6 py-3 font-semibold text-right">Acciones</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-gray-100">
+                    {categories.map((cat) => (
+                      <tr key={cat.id} className="hover:bg-gray-50 transition-colors">
+                        <td className="px-6 py-4 text-sm text-gray-500">#{cat.order}</td>
+                        <td className="px-6 py-4 text-sm font-medium text-gray-900">{cat.name}</td>
+                        <td className="px-6 py-4 text-right">
+                          <div className="flex justify-end gap-2">
+                            <button
+                              onClick={() => copyCategoryUrl(cat)}
+                              className="text-gray-400 hover:text-blue-600 p-2"
+                              title="Copiar link"
+                            >
+                              <i className="fa-solid fa-link"></i>
+                            </button>
+
+                            <button
+                              onClick={() => shareCategoryOnWhatsApp(cat)}
+                              className="text-gray-400 hover:text-green-600 p-2"
+                              title="Compartir por WhatsApp"
+                            >
+                              <i className="fa-brands fa-whatsapp"></i>
+                            </button>
+
+                            <button
+                              onClick={() => shareCategory(cat)}
+                              className="text-gray-400 hover:text-indigo-600 p-2"
+                              title="Compartir en redes"
+                            >
+                              <i className="fa-solid fa-share-nodes"></i>
+                            </button>
+
+                            <button
+                              onClick={() => setEditingCategory(cat)}
+                              className="text-gray-400 hover:text-indigo-600 p-2"
+                              title="Editar"
+                            >
+                              <i className="fa-solid fa-pen-to-square"></i>
+                            </button>
+
+                            <button
+                              onClick={() => handleDeleteCategory(cat.id)}
+                              className="text-gray-400 hover:text-red-600 p-2"
+                              title="Eliminar"
+                            >
+                              <i className="fa-solid fa-trash-can"></i>
+                            </button>
+                          </div>
+                        </td>
+                      </tr>
+                    ))}
+                    {!categories.length ? (
+                      <tr>
+                        <td className="px-6 py-6 text-sm text-gray-400" colSpan={3}>
+                          Aún no hay categorías.
+                        </td>
+                      </tr>
+                    ) : null}
+                  </tbody>
+                </table>
+              </div>
+            </div>
           )}
         </div>
       </div>

@@ -23,7 +23,7 @@ const SettingsView: React.FC = () => {
     const [saving, setSaving] = useState(false);
     const [error, setError] = useState("");
 
-    // form
+    // form — campos originales
     const [name, setName] = useState("");
     const [slug, setSlug] = useState("");
     const [description, setDescription] = useState("");
@@ -32,6 +32,17 @@ const SettingsView: React.FC = () => {
     const [logoFile, setLogoFile] = useState<File | null>(null);
     const [logoPreview, setLogoPreview] = useState<string>("");
     const [logoUploading, setLogoUploading] = useState(false);
+
+    // form — campos nuevos
+    const [brandColor, setBrandColor] = useState("#6366f1");
+    const [bannerFile, setBannerFile] = useState<File | null>(null);
+    const [bannerPreview, setBannerPreview] = useState<string>("");
+    const [bannerUploading, setBannerUploading] = useState(false);
+    const [instagram, setInstagram] = useState("");
+    const [facebook, setFacebook] = useState("");
+    const [email, setEmail] = useState("");
+    const [phone, setPhone] = useState("");
+    const [location, setLocation] = useState("");
 
     // cargar tienda
     useEffect(() => {
@@ -73,11 +84,22 @@ const SettingsView: React.FC = () => {
             setWhatsapp(s.whatsapp ?? "");
             setIsActive(s.isActive ?? true);
 
+            // cargar campos nuevos si existen en Firestore
+            setBrandColor(data.brandColor ?? "#6366f1");
+            setBannerPreview(data.bannerUrl ?? "");
+            setInstagram(data.instagram ?? "");
+            setFacebook(data.facebook ?? "");
+            setEmail(data.email ?? "");
+            setPhone(data.phone ?? "");
+            setLocation(data.location ?? "");
+
             setLoading(false);
         };
 
         load();
     }, [user]);
+
+    // --- Upload helpers ---
 
     const uploadStoreLogo = async (): Promise<{ logoUrl: string; logoPath: string } | null> => {
         if (!store || !logoFile) return null;
@@ -85,10 +107,8 @@ const SettingsView: React.FC = () => {
         setLogoUploading(true);
         try {
             const optimized = await compressImage(logoFile);
-
             const path = `stores/${store.id}/logo/${Date.now()}_${logoFile.name}`;
             const storageRef = ref(storage, path);
-
             await uploadBytes(storageRef, optimized);
             const url = await getDownloadURL(storageRef);
 
@@ -106,11 +126,41 @@ const SettingsView: React.FC = () => {
         }
     };
 
+    const uploadStoreBanner = async (): Promise<{ bannerUrl: string; bannerPath: string } | null> => {
+        if (!store || !bannerFile) return null;
+
+        setBannerUploading(true);
+        try {
+            const optimized = await compressImage(bannerFile);
+            const path = `stores/${store.id}/banner/${Date.now()}_${bannerFile.name}`;
+            const storageRef = ref(storage, path);
+            await uploadBytes(storageRef, optimized);
+            const url = await getDownloadURL(storageRef);
+
+            // borrar banner anterior si existe
+            const currentBannerPath = (store as any).bannerPath;
+            if (currentBannerPath) {
+                try {
+                    await deleteObject(ref(storage, currentBannerPath));
+                } catch (e) {
+                    console.warn("No se pudo borrar banner anterior:", e);
+                }
+            }
+
+            return { bannerUrl: url, bannerPath: path };
+        } finally {
+            setBannerUploading(false);
+        }
+    };
+
+    // --- URL catálogo ---
 
     const catalogUrl = useMemo(() => {
         if (!store?.slug) return "";
         return `${window.location.origin}/#/${store.slug}`;
     }, [store?.slug]);
+
+    // --- Guardar ---
 
     const handleSave = async () => {
         if (!store) return;
@@ -130,10 +180,16 @@ const SettingsView: React.FC = () => {
         setError("");
 
         let logoPayload: any = {};
+        let bannerPayload: any = {};
 
         if (logoFile) {
             const uploaded = await uploadStoreLogo();
             if (uploaded) logoPayload = uploaded;
+        }
+
+        if (bannerFile) {
+            const uploaded = await uploadStoreBanner();
+            if (uploaded) bannerPayload = uploaded;
         }
 
         try {
@@ -143,14 +199,33 @@ const SettingsView: React.FC = () => {
                 description: description.trim(),
                 whatsapp: whatsapp.trim(),
                 isActive,
+                // nuevos campos
+                brandColor,
+                instagram: instagram.trim(),
+                facebook: facebook.trim(),
+                email: email.trim(),
+                phone: phone.trim(),
+                location: location.trim(),
                 ...logoPayload,
+                ...bannerPayload,
                 updatedAt: new Date(),
             });
 
             alert("Configuración guardada ✅");
-            setStore({ ...store, name, slug: cleanSlug, description, whatsapp, isActive, ...logoPayload });
+            setStore({
+                ...store,
+                name,
+                slug: cleanSlug,
+                description,
+                whatsapp,
+                isActive,
+                ...logoPayload,
+                ...bannerPayload,
+            } as any);
             if (logoPayload.logoUrl) setLogoPreview(logoPayload.logoUrl);
+            if (bannerPayload.bannerUrl) setBannerPreview(bannerPayload.bannerUrl);
             setLogoFile(null);
+            setBannerFile(null);
 
         } catch (e) {
             console.error(e);
@@ -170,7 +245,7 @@ const SettingsView: React.FC = () => {
 
     return (
         <div className="space-y-8 max-w-3xl">
-            
+
             <div>
                 <h1 className="text-2xl font-bold text-gray-900">Configuración de la tienda</h1>
                 <p className="text-gray-500 mt-1">
@@ -178,6 +253,7 @@ const SettingsView: React.FC = () => {
                 </p>
             </div>
 
+            {/* ── Logo ── */}
             <div className="bg-white border rounded-xl p-6 space-y-4">
                 <h2 className="font-bold text-gray-900">Logo del negocio</h2>
 
@@ -210,16 +286,93 @@ const SettingsView: React.FC = () => {
                             Recomendado: cuadrado (1:1). Se optimiza automáticamente antes de subir.
                         </p>
 
-                        {logoFile ? (
+                        {logoFile && (
                             <p className="text-xs text-indigo-600 mt-1 font-semibold">
                                 Listo para guardar: {logoFile.name}
                             </p>
-                        ) : null}
+                        )}
                     </div>
                 </div>
             </div>
 
-            {/* Info tienda */}
+            {/* ── Banner principal (NUEVO) ── */}
+            <div className="bg-white border rounded-xl p-6 space-y-4">
+                <h2 className="font-bold text-gray-900">Banner principal</h2>
+
+                {bannerPreview && (
+                    <div className="w-full h-36 rounded-xl overflow-hidden border bg-gray-100">
+                        <img
+                            src={bannerPreview}
+                            alt="Banner"
+                            className="w-full h-full object-cover"
+                        />
+                    </div>
+                )}
+
+                <div className="flex items-center gap-4">
+                    <label className="inline-flex items-center gap-2 px-4 py-2 rounded-lg border font-semibold cursor-pointer hover:bg-gray-50">
+                        <i className="fa-solid fa-image" />
+                        {bannerPreview ? "Cambiar banner" : "Subir banner"}
+                        <input
+                            type="file"
+                            accept="image/*"
+                            className="hidden"
+                            onChange={(e) => {
+                                const f = e.target.files?.[0] || null;
+                                setBannerFile(f);
+                                if (f) setBannerPreview(URL.createObjectURL(f));
+                            }}
+                        />
+                    </label>
+
+                    {bannerPreview && (
+                        <button
+                            type="button"
+                            onClick={() => {
+                                setBannerFile(null);
+                                setBannerPreview("");
+                            }}
+                            className="text-sm text-red-500 hover:underline"
+                        >
+                            Quitar banner
+                        </button>
+                    )}
+                </div>
+
+                <p className="text-xs text-gray-500">
+                    Recomendado: 1200 × 400 px (proporción 3:1). Se optimiza antes de subir.
+                </p>
+
+                {bannerFile && (
+                    <p className="text-xs text-indigo-600 font-semibold">
+                        Listo para guardar: {bannerFile.name}
+                    </p>
+                )}
+            </div>
+
+            {/* ── Color de marca (NUEVO) ── */}
+            <div className="bg-white border rounded-xl p-6 space-y-4">
+                <h2 className="font-bold text-gray-900">Color de marca</h2>
+
+                <div className="flex items-center gap-4">
+                    <input
+                        type="color"
+                        value={brandColor}
+                        onChange={(e) => setBrandColor(e.target.value)}
+                        className="h-12 w-12 rounded-lg border cursor-pointer p-1"
+                    />
+                    <div>
+                        <p className="text-sm font-medium text-gray-700">Color principal</p>
+                        <p className="text-xs text-gray-500 font-mono">{brandColor}</p>
+                    </div>
+                </div>
+
+                <p className="text-xs text-gray-500">
+                    Se usará en botones y elementos destacados de tu catálogo público.
+                </p>
+            </div>
+
+            {/* ── Información general (original) ── */}
             <div className="bg-white border rounded-xl p-6 space-y-4">
                 <h2 className="font-bold text-gray-900">Información general</h2>
 
@@ -255,7 +408,7 @@ const SettingsView: React.FC = () => {
                 </div>
             </div>
 
-            {/* Catálogo */}
+            {/* ── Catálogo público (original) ── */}
             <div className="bg-white border rounded-xl p-6 space-y-4">
                 <h2 className="font-bold text-gray-900">Catálogo público</h2>
 
@@ -288,23 +441,107 @@ const SettingsView: React.FC = () => {
                 </label>
             </div>
 
-            {/* WhatsApp */}
+            {/* ── Redes sociales y contacto (NUEVO) ── */}
             <div className="bg-white border rounded-xl p-6 space-y-4">
-                <h2 className="font-bold text-gray-900">Pedidos</h2>
+                <h2 className="font-bold text-gray-900">Redes sociales y contacto</h2>
 
+                {/* WhatsApp principal */}
                 <div>
-                    <label className="text-sm font-medium text-gray-700">
-                        WhatsApp (solo números)
+                    <label className="text-sm font-medium text-gray-700 flex items-center gap-2">
+                        <i className="fa-brands fa-whatsapp text-green-500" />
+                        WhatsApp principal (solo números)
                     </label>
                     <input
                         className="w-full mt-1 p-3 border rounded-lg"
+                        placeholder="573001234567"
                         value={whatsapp}
                         onChange={(e) => setWhatsapp(e.target.value.replace(/[^\d]/g, ""))}
                     />
                 </div>
+
+                {/* Instagram */}
+                <div>
+                    <label className="text-sm font-medium text-gray-700 flex items-center gap-2">
+                        <i className="fa-brands fa-instagram text-pink-500" />
+                        Instagram
+                    </label>
+                    <div className="flex mt-1">
+                        <span className="inline-flex items-center px-3 border border-r-0 rounded-l-lg bg-gray-50 text-gray-500 text-sm">
+                            @
+                        </span>
+                        <input
+                            className="flex-1 p-3 border rounded-r-lg"
+                            placeholder="tu_usuario"
+                            value={instagram}
+                            onChange={(e) => setInstagram(e.target.value.replace(/\s/g, ""))}
+                        />
+                    </div>
+                </div>
+
+                {/* Facebook */}
+                <div>
+                    <label className="text-sm font-medium text-gray-700 flex items-center gap-2">
+                        <i className="fa-brands fa-facebook text-blue-600" />
+                        Facebook
+                    </label>
+                    <div className="flex mt-1">
+                        <span className="inline-flex items-center px-3 border border-r-0 rounded-l-lg bg-gray-50 text-gray-500 text-sm">
+                            facebook.com/
+                        </span>
+                        <input
+                            className="flex-1 p-3 border rounded-r-lg"
+                            placeholder="tu.pagina"
+                            value={facebook}
+                            onChange={(e) => setFacebook(e.target.value.replace(/\s/g, ""))}
+                        />
+                    </div>
+                </div>
+
+                {/* Correo */}
+                <div>
+                    <label className="text-sm font-medium text-gray-700 flex items-center gap-2">
+                        <i className="fa-regular fa-envelope text-gray-500" />
+                        Correo electrónico
+                    </label>
+                    <input
+                        type="email"
+                        className="w-full mt-1 p-3 border rounded-lg"
+                        placeholder="contacto@tunegocio.com"
+                        value={email}
+                        onChange={(e) => setEmail(e.target.value)}
+                    />
+                </div>
+
+                {/* Teléfono */}
+                <div>
+                    <label className="text-sm font-medium text-gray-700 flex items-center gap-2">
+                        <i className="fa-solid fa-phone text-gray-500" />
+                        Teléfono
+                    </label>
+                    <input
+                        className="w-full mt-1 p-3 border rounded-lg"
+                        placeholder="3001234567"
+                        value={phone}
+                        onChange={(e) => setPhone(e.target.value.replace(/[^\d+\s()-]/g, ""))}
+                    />
+                </div>
+
+                {/* Ubicación */}
+                <div>
+                    <label className="text-sm font-medium text-gray-700 flex items-center gap-2">
+                        <i className="fa-solid fa-location-dot text-red-500" />
+                        Ubicación / Dirección
+                    </label>
+                    <input
+                        className="w-full mt-1 p-3 border rounded-lg"
+                        placeholder="Calle 10 # 5-20, Ibagué, Tolima"
+                        value={location}
+                        onChange={(e) => setLocation(e.target.value)}
+                    />
+                </div>
             </div>
 
-            {/* Guardar */}
+            {/* ── Guardar (original) ── */}
             {error && <div className="text-sm text-red-600">{error}</div>}
 
             <div className="flex justify-end">

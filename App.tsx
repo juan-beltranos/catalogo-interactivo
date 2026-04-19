@@ -15,6 +15,7 @@ import ProtectedRoute from './components/auth/ProtectedRoute';
 import { AuthProvider } from './context/AuthContext';
 import RegisterView from './views/admin/RegisterView';
 import SettingsView from './views/admin/SettingsView';
+import SubscriptionView from './views/admin/SubscriptionView';
 
 const App: React.FC = () => {
   return (
@@ -38,6 +39,7 @@ const App: React.FC = () => {
               <Route path="categories" element={<CategoriesView />} />
               <Route path="orders" element={<OrdersView />} />
               <Route path="customers" element={<CustomersView />} />
+              <Route path="subscription" element={<SubscriptionView />} />
               <Route path="settings" element={<SettingsView />} />
             </Route>
           </Route>
