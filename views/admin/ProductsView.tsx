@@ -35,6 +35,26 @@ import { storage } from "../../lib/firebase";
 import ImportProductsExcel from "@/components/catalog/ImportProductsExcel";
 import { cloudinaryConfig } from "@/lib/cloudinary";
 
+import {
+  DndContext,
+  DragEndEvent,
+  KeyboardSensor,
+  PointerSensor,
+  TouchSensor,
+  closestCenter,
+  useSensor,
+  useSensors,
+} from "@dnd-kit/core";
+
+import {
+  SortableContext,
+  arrayMove,
+  sortableKeyboardCoordinates,
+  useSortable,
+  verticalListSortingStrategy,
+} from "@dnd-kit/sortable";
+import { CSS } from "@dnd-kit/utilities";
+
 const PAGE_SIZE = 10;
 
 const FREE_MAX_PRODUCTS = 300;
@@ -53,6 +73,123 @@ type PageCache = {
 let pageCache: PageCache | null = null;
 
 const allProductsCache = new Map<string, Product[]>();
+
+type SortableProductRowProps = {
+  prod: Product;
+  index: number;
+  displayPrice: string;
+  hasVariants: boolean;
+  openEdit: (p: Product) => void;
+  handleDeleteProduct: (p: Product) => void;
+};
+
+const SortableProductRow: React.FC<SortableProductRowProps> = ({
+  prod,
+  displayPrice,
+  hasVariants,
+  openEdit,
+  handleDeleteProduct,
+}) => {
+  const {
+    attributes,
+    listeners,
+    setNodeRef,
+    transform,
+    transition,
+    isDragging,
+  } = useSortable({ id: prod.id });
+
+  const style: React.CSSProperties = {
+    transform: CSS.Transform.toString(transform),
+    transition,
+  };
+
+  return (
+    <tr
+      ref={setNodeRef}
+      style={style}
+      className={`text-sm transition-colors ${isDragging ? "bg-indigo-50 opacity-80 relative z-10" : ""
+        }`}
+    >
+      <td className="px-3 py-4">
+        <button
+          type="button"
+          {...attributes}
+          {...listeners}
+          style={{ touchAction: "none" }}
+          className="cursor-grab active:cursor-grabbing text-gray-300 hover:text-gray-500 flex items-center justify-center w-10 h-10"
+          title="Arrastrar para reordenar"
+        >
+          <i className="fa-solid fa-grip-vertical text-base" />
+        </button>
+      </td>
+
+      <td className="px-4 sm:px-6 py-4 font-medium">
+        <div className="flex items-center gap-3">
+          {prod.images?.[0]?.url ? (
+            <img
+              src={cldImg(prod.images[0].url, {
+                w: 80,
+                h: 80,
+                crop: "fill",
+              })}
+              alt={prod.name}
+              className="w-10 h-10 rounded object-cover border shrink-0"
+              loading="lazy"
+            />
+          ) : (
+            <div className="w-10 h-10 rounded bg-gray-100 border shrink-0" />
+          )}
+
+          <div className="min-w-0 flex-1">
+            <div className="font-semibold text-gray-900 truncate">
+              {prod.name}
+            </div>
+
+            <div className="text-xs text-gray-400 line-clamp-2 sm:line-clamp-1">
+              {prod.description || ""}
+            </div>
+
+            {(prod.videos?.length ?? 0) > 0 ? (
+              <div className="mt-1 text-[10px] text-gray-400">
+                <i className="fa-solid fa-video mr-1" />
+                {prod.videos!.length} video(s)
+              </div>
+            ) : null}
+          </div>
+        </div>
+      </td>
+
+      <td className="px-4 sm:px-6 py-4 font-bold text-indigo-600 whitespace-nowrap">
+        {displayPrice}
+      </td>
+
+      <td className="px-4 sm:px-6 py-4 text-gray-600 whitespace-nowrap">
+        {hasVariants ? prod.variants?.length : "-"}
+      </td>
+
+      <td className="px-4 sm:px-6 py-4 text-right whitespace-nowrap">
+        <button
+          onClick={() => openEdit(prod)}
+          className="inline-flex items-center justify-center w-10 h-10 rounded-lg border border-gray-200 text-gray-500 hover:text-indigo-600 hover:border-indigo-200 hover:bg-indigo-50"
+          title="Editar"
+          type="button"
+        >
+          <i className="fa-solid fa-pen" />
+        </button>
+
+        <button
+          onClick={() => handleDeleteProduct(prod)}
+          className="ml-2 inline-flex items-center justify-center w-10 h-10 rounded-lg border border-gray-200 text-gray-500 hover:text-red-600 hover:border-red-200 hover:bg-red-50"
+          title="Eliminar"
+          type="button"
+        >
+          <i className="fa-solid fa-trash-can" />
+        </button>
+      </td>
+    </tr>
+  );
+};
 
 const ProductsView: React.FC = () => {
   const { user } = useAuth();
@@ -73,10 +210,7 @@ const ProductsView: React.FC = () => {
   const [history, setHistory] = useState<QueryDocumentSnapshot<DocumentData>[]>([]);
 
   // ── Drag & drop state ────────────────────────────────────────────────────
-  const [dragIndex, setDragIndex] = useState<number | null>(null);
-  const [dragOverIndex, setDragOverIndex] = useState<number | null>(null);
   const [savingOrder, setSavingOrder] = useState(false);
-  const dragNode = useRef<HTMLTableRowElement | null>(null);
 
   // Create form
   const [name, setName] = useState("");
@@ -395,72 +529,67 @@ const ProductsView: React.FC = () => {
   }, [history, loadingPage, pageFirstDoc, pageLastDoc, loadPage]);
 
   // ── Drag & drop handlers ─────────────────────────────────────────────────
+  const sensors = useSensors(
+    useSensor(PointerSensor, {
+      activationConstraint: {
+        distance: 6,
+      },
+    }),
+    useSensor(TouchSensor, {
+      activationConstraint: {
+        delay: 180,
+        tolerance: 8,
+      },
+    }),
+    useSensor(KeyboardSensor, {
+      coordinateGetter: sortableKeyboardCoordinates,
+    })
+  );
 
-  const handleDragStart = (e: React.DragEvent<HTMLTableRowElement>, index: number) => {
-    dragNode.current = e.currentTarget;
-    setDragIndex(index);
-    e.dataTransfer.effectAllowed = "move";
-    // Pequeño delay para que el ghost se vea bien
-    setTimeout(() => {
-      if (dragNode.current) dragNode.current.style.opacity = "0.4";
-    }, 0);
-  };
+  const handleDragEnd = async (event: DragEndEvent) => {
+    const { active, over } = event;
 
-  const handleDragEnter = (e: React.DragEvent<HTMLTableRowElement>, index: number) => {
-    e.preventDefault();
-    if (index !== dragIndex) setDragOverIndex(index);
-  };
+    if (!over || active.id === over.id || !storeId) return;
 
-  const handleDragOver = (e: React.DragEvent<HTMLTableRowElement>) => {
-    e.preventDefault();
-    e.dataTransfer.dropEffect = "move";
-  };
+    const oldIndex = products.findIndex((p) => p.id === active.id);
+    const newIndex = products.findIndex((p) => p.id === over.id);
 
-  const handleDragEnd = () => {
-    if (dragNode.current) dragNode.current.style.opacity = "1";
-    setDragIndex(null);
-    setDragOverIndex(null);
-    dragNode.current = null;
-  };
+    if (oldIndex === -1 || newIndex === -1) return;
 
-  const handleDrop = async (e: React.DragEvent<HTMLTableRowElement>, dropIndex: number) => {
-    e.preventDefault();
-    if (dragIndex === null || dragIndex === dropIndex || !storeId) {
-      handleDragEnd();
-      return;
+    const reordered = arrayMove(products, oldIndex, newIndex);
+
+    const pageOffset = (page - 1) * PAGE_SIZE;
+    const updated = reordered.map((p, i) => ({
+      ...p,
+      order: pageOffset + i,
+    }));
+
+    setProducts(updated);
+
+    if (pageCache?.storeId === storeId) {
+      pageCache.products = updated;
     }
 
-    // Reordenar lista local
-    const reordered = [...products];
-    const [moved] = reordered.splice(dragIndex, 1);
-    reordered.splice(dropIndex, 0, moved);
-
-    // Asignar valores de `order` basados en la posición en esta página
-    // Para páginas distintas a la 1 usamos un offset para no pisar órdenes de páginas anteriores
-    const pageOffset = (page - 1) * PAGE_SIZE;
-    const updated = reordered.map((p, i) => ({ ...p, order: pageOffset + i }));
-
-    // Actualizar estado local inmediatamente (optimista)
-    setProducts(updated);
-    if (pageCache?.storeId === storeId) pageCache.products = updated;
-
-    handleDragEnd();
-
-    // Guardar en Firestore en batch
     setSavingOrder(true);
+
     try {
       const batch = writeBatch(db);
+
       updated.forEach((p) => {
         batch.update(doc(db, "stores", storeId, "products", p.id), {
           order: p.order,
           updatedAt: serverTimestamp(),
         });
       });
+
       await batch.commit();
+
+      if (allLoaded) {
+        await reloadAllProducts();
+      }
     } catch (err) {
       console.error("Error guardando orden:", err);
       alert("No se pudo guardar el orden. Intenta de nuevo.");
-      // Revertir al orden anterior
       await loadFirstPage();
     } finally {
       setSavingOrder(false);
@@ -921,79 +1050,120 @@ const ProductsView: React.FC = () => {
                 </thead>
 
                 <tbody className="divide-y">
-                  {listToRender.map((prod, index) => {
-                    const hasVariants = (prod.variants?.length ?? 0) > 0;
-                    const displayPrice = hasVariants
-                      ? `Desde ${formatCOP(Math.min(...prod.variants.map((v) => v.price || 0)))}`
-                      : formatCOP(prod.price);
-
-                    const isDragging = dragIndex === index;
-                    const isOver = dragOverIndex === index;
-
-                    return (
-                      <tr
-                        key={prod.id}
-                        className={`text-sm transition-colors
-                          ${isDragging ? "bg-indigo-50" : ""}
-                          ${isOver && !isDragging ? "bg-indigo-50 border-t-2 border-indigo-400" : ""}
-                        `}
-                        draggable={!search}
-                        onDragStart={!search ? (e) => handleDragStart(e, index) : undefined}
-                        onDragEnter={!search ? (e) => handleDragEnter(e, index) : undefined}
-                        onDragOver={!search ? handleDragOver : undefined}
-                        onDragEnd={!search ? handleDragEnd : undefined}
-                        onDrop={!search ? (e) => handleDrop(e, index) : undefined}
+                  {!search ? (
+                    <DndContext
+                      sensors={sensors}
+                      collisionDetection={closestCenter}
+                      onDragEnd={handleDragEnd}
+                    >
+                      <SortableContext
+                        items={products.map((p) => p.id)}
+                        strategy={verticalListSortingStrategy}
                       >
-                        {/* Handle */}
-                        {!search && (
-                          <td className="px-3 py-4">
-                            <div
-                              className="cursor-grab active:cursor-grabbing text-gray-300 hover:text-gray-500 flex flex-col items-center gap-0.5"
-                              title="Arrastrar para reordenar"
-                            >
-                              <i className="fa-solid fa-grip-vertical text-base" />
+                        {products.map((prod, index) => {
+                          const hasVariants = (prod.variants?.length ?? 0) > 0;
+
+                          const displayPrice = hasVariants
+                            ? `Desde ${formatCOP(
+                              Math.min(...prod.variants!.map((v) => v.price || 0))
+                            )}`
+                            : formatCOP(prod.price);
+
+                          return (
+                            <SortableProductRow
+                              key={prod.id}
+                              prod={prod}
+                              index={index}
+                              displayPrice={displayPrice}
+                              hasVariants={hasVariants}
+                              openEdit={openEdit}
+                              handleDeleteProduct={handleDeleteProduct}
+                            />
+                          );
+                        })}
+                      </SortableContext>
+                    </DndContext>
+                  ) : (
+                    searchResults.map((prod) => {
+                      const hasVariants = (prod.variants?.length ?? 0) > 0;
+
+                      const displayPrice = hasVariants
+                        ? `Desde ${formatCOP(
+                          Math.min(...prod.variants!.map((v) => v.price || 0))
+                        )}`
+                        : formatCOP(prod.price);
+
+                      return (
+                        <tr key={prod.id} className="text-sm transition-colors">
+                          <td className="px-4 sm:px-6 py-4 font-medium">
+                            <div className="flex items-center gap-3">
+                              {prod.images?.[0]?.url ? (
+                                <img
+                                  src={cldImg(prod.images[0].url, {
+                                    w: 80,
+                                    h: 80,
+                                    crop: "fill",
+                                  })}
+                                  alt={prod.name}
+                                  className="w-10 h-10 rounded object-cover border shrink-0"
+                                  loading="lazy"
+                                />
+                              ) : (
+                                <div className="w-10 h-10 rounded bg-gray-100 border shrink-0" />
+                              )}
+
+                              <div className="min-w-0 flex-1">
+                                <div className="font-semibold text-gray-900 truncate">
+                                  {prod.name}
+                                </div>
+                                <div className="text-xs text-gray-400 line-clamp-2 sm:line-clamp-1">
+                                  {prod.description || ""}
+                                </div>
+                              </div>
                             </div>
                           </td>
-                        )}
 
-                        <td className="px-4 sm:px-6 py-4 font-medium">
-                          <div className="flex items-center gap-3">
-                            {prod.images?.[0]?.url ? (
-                              <img src={cldImg(prod.images[0].url, { w: 80, h: 80, crop: "fill" })} alt={prod.name} className="w-10 h-10 rounded object-cover border shrink-0" loading="lazy" />
-                            ) : (
-                              <div className="w-10 h-10 rounded bg-gray-100 border shrink-0" />
-                            )}
-                            <div className="min-w-0 flex-1">
-                              <div className="font-semibold text-gray-900 truncate">{prod.name}</div>
-                              <div className="text-xs text-gray-400 line-clamp-2 sm:line-clamp-1">{prod.description || ""}</div>
-                              {(prod.videos?.length ?? 0) > 0 ? (
-                                <div className="mt-1 text-[10px] text-gray-400"><i className="fa-solid fa-video mr-1" />{prod.videos!.length} video(s)</div>
-                              ) : null}
-                            </div>
-                          </div>
-                        </td>
+                          <td className="px-4 sm:px-6 py-4 font-bold text-indigo-600 whitespace-nowrap">
+                            {displayPrice}
+                          </td>
 
-                        <td className="px-4 sm:px-6 py-4 font-bold text-indigo-600 whitespace-nowrap">{displayPrice}</td>
-                        <td className="px-4 sm:px-6 py-4 text-gray-600 whitespace-nowrap">{hasVariants ? prod.variants.length : "-"}</td>
+                          <td className="px-4 sm:px-6 py-4 text-gray-600 whitespace-nowrap">
+                            {hasVariants ? prod.variants?.length : "-"}
+                          </td>
 
-                        <td className="px-4 sm:px-6 py-4 text-right whitespace-nowrap">
-                          <button onClick={() => openEdit(prod)} className="inline-flex items-center justify-center w-10 h-10 rounded-lg border border-gray-200 text-gray-500 hover:text-indigo-600 hover:border-indigo-200 hover:bg-indigo-50" title="Editar" type="button">
-                            <i className="fa-solid fa-pen" />
-                          </button>
-                          <button onClick={() => handleDeleteProduct(prod)} className="ml-2 inline-flex items-center justify-center w-10 h-10 rounded-lg border border-gray-200 text-gray-500 hover:text-red-600 hover:border-red-200 hover:bg-red-50" title="Eliminar" type="button">
-                            <i className="fa-solid fa-trash-can" />
-                          </button>
-                        </td>
-                      </tr>
-                    );
-                  })}
+                          <td className="px-4 sm:px-6 py-4 text-right whitespace-nowrap">
+                            <button
+                              onClick={() => openEdit(prod)}
+                              className="inline-flex items-center justify-center w-10 h-10 rounded-lg border border-gray-200 text-gray-500 hover:text-indigo-600 hover:border-indigo-200 hover:bg-indigo-50"
+                              title="Editar"
+                              type="button"
+                            >
+                              <i className="fa-solid fa-pen" />
+                            </button>
 
-                  {!products.length ? (
+                            <button
+                              onClick={() => handleDeleteProduct(prod)}
+                              className="ml-2 inline-flex items-center justify-center w-10 h-10 rounded-lg border border-gray-200 text-gray-500 hover:text-red-600 hover:border-red-200 hover:bg-red-50"
+                              title="Eliminar"
+                              type="button"
+                            >
+                              <i className="fa-solid fa-trash-can" />
+                            </button>
+                          </td>
+                        </tr>
+                      );
+                    })
+                  )}
+
+                  {!listToRender.length ? (
                     <tr>
-                      <td className="px-6 py-8 text-gray-400" colSpan={search ? 4 : 5}>Aún no hay productos.</td>
+                      <td className="px-6 py-8 text-gray-400" colSpan={search ? 4 : 5}>
+                        Aún no hay productos.
+                      </td>
                     </tr>
                   ) : null}
                 </tbody>
+
               </table>
 
               {!search ? (
