@@ -11,10 +11,138 @@ import {
   serverTimestamp,
   getDocs,
   where,
+  writeBatch,
 } from "firebase/firestore";
 import { db } from "../../lib/firebase";
 import { Category } from "@/interfaces";
 import { useAuth } from "@/context/AuthContext";
+
+import {
+  DndContext,
+  closestCenter,
+  PointerSensor,
+  TouchSensor,
+  useSensor,
+  useSensors,
+  DragEndEvent,
+} from "@dnd-kit/core";
+
+import {
+  SortableContext,
+  useSortable,
+  arrayMove,
+  verticalListSortingStrategy,
+} from "@dnd-kit/sortable";
+
+import { CSS } from "@dnd-kit/utilities";
+
+type SortableCategoryRowProps = {
+  cat: Category;
+  onCopy: (cat: Category) => void;
+  onWhatsApp: (cat: Category) => void;
+  onShare: (cat: Category) => void;
+  onEdit: (cat: Category) => void;
+  onDelete: (id: string) => void;
+};
+
+const SortableCategoryRow: React.FC<SortableCategoryRowProps> = ({
+  cat,
+  onCopy,
+  onWhatsApp,
+  onShare,
+  onEdit,
+  onDelete,
+}) => {
+  const {
+    attributes,
+    listeners,
+    setNodeRef,
+    transform,
+    transition,
+    isDragging,
+  } = useSortable({ id: cat.id });
+
+  const style: React.CSSProperties = {
+    transform: CSS.Transform.toString(transform),
+    transition,
+  };
+
+  return (
+    <tr
+      ref={setNodeRef}
+      style={style}
+      className={`hover:bg-gray-50 transition-colors ${isDragging ? "bg-indigo-50 shadow-lg opacity-80 relative z-10" : ""
+        }`}
+    >
+      <td className="px-6 py-4 text-sm text-gray-500">
+        <div className="flex items-center gap-3">
+          <button
+            type="button"
+            {...attributes}
+            {...listeners}
+            className="cursor-grab active:cursor-grabbing text-gray-400 hover:text-indigo-600 touch-none"
+            title="Arrastrar categoría"
+          >
+            <i className="fa-solid fa-grip-vertical"></i>
+          </button>
+
+          <span>#{cat.order}</span>
+        </div>
+      </td>
+
+      <td className="px-6 py-4 text-sm font-medium text-gray-900">{cat.name}</td>
+
+      <td className="px-6 py-4 text-right">
+        <div className="flex justify-end gap-2">
+          <button
+            type="button"
+            onClick={() => onCopy(cat)}
+            className="text-gray-400 hover:text-blue-600 p-2"
+            title="Copiar link"
+          >
+            <i className="fa-solid fa-link"></i>
+          </button>
+
+          <button
+            type="button"
+            onClick={() => onWhatsApp(cat)}
+            className="text-gray-400 hover:text-green-600 p-2"
+            title="Compartir por WhatsApp"
+          >
+            <i className="fa-brands fa-whatsapp"></i>
+          </button>
+
+          <button
+            type="button"
+            onClick={() => onShare(cat)}
+            className="text-gray-400 hover:text-indigo-600 p-2"
+            title="Compartir en redes"
+          >
+            <i className="fa-solid fa-share-nodes"></i>
+          </button>
+
+          <button
+            type="button"
+            onClick={() => onEdit(cat)}
+            className="text-gray-400 hover:text-indigo-600 p-2"
+            title="Editar"
+          >
+            <i className="fa-solid fa-pen-to-square"></i>
+          </button>
+
+          <button
+            type="button"
+            onClick={() => onDelete(cat.id)}
+            className="text-gray-400 hover:text-red-600 p-2"
+            title="Eliminar"
+          >
+            <i className="fa-solid fa-trash-can"></i>
+          </button>
+        </div>
+      </td>
+    </tr>
+  );
+};
 
 const CategoriesView: React.FC = () => {
   const { user } = useAuth();
@@ -29,6 +157,20 @@ const CategoriesView: React.FC = () => {
   const [error, setError] = useState("");
 
   const [editingCategory, setEditingCategory] = useState<Category | null>(null);
+
+  const sensors = useSensors(
+    useSensor(PointerSensor, {
+      activationConstraint: {
+        distance: 6,
+      },
+    }),
+    useSensor(TouchSensor, {
+      activationConstraint: {
+        delay: 150,
+        tolerance: 5,
+      },
+    })
+  );
 
   useEffect(() => {
     if (!user) return;
@@ -52,7 +194,6 @@ const CategoriesView: React.FC = () => {
           setStoreSlug("");
           setError("No se encontró tienda para este usuario.");
         }
-
       } catch (e) {
         console.error(e);
         setError("Error buscando tienda del usuario.");
@@ -71,7 +212,9 @@ const CategoriesView: React.FC = () => {
 
   const getCategoryUrl = (category: Category) => {
     if (!storeSlug) return "";
-    return `${window.location.origin}/#/${storeSlug}?category=${encodeURIComponent(category.id)}`;
+    return `${window.location.origin}/#/${storeSlug}?category=${encodeURIComponent(
+      category.id
+    )}`;
   };
 
   const copyCategoryUrl = async (category: Category) => {
@@ -162,6 +305,47 @@ const CategoriesView: React.FC = () => {
     return () => unsubscribe();
   }, [categoriesRef]);
 
+  const handleDragEnd = async (event: DragEndEvent) => {
+    const { active, over } = event;
+
+    if (!storeId || !over || active.id === over.id) return;
+
+    const oldIndex = categories.findIndex((cat) => cat.id === active.id);
+    const newIndex = categories.findIndex((cat) => cat.id === over.id);
+
+    if (oldIndex === -1 || newIndex === -1) return;
+
+    const previousCategories = categories;
+
+    const reorderedCategories = arrayMove(categories, oldIndex, newIndex).map(
+      (cat, index) => ({
+        ...cat,
+        order: index + 1,
+      })
+    );
+
+    setCategories(reorderedCategories);
+    setError("");
+
+    try {
+      const batch = writeBatch(db);
+
+      reorderedCategories.forEach((cat) => {
+        const catRef = doc(db, "stores", storeId, "categories", cat.id);
+        batch.update(catRef, {
+          order: cat.order,
+          updatedAt: serverTimestamp(),
+        });
+      });
+
+      await batch.commit();
+    } catch (err) {
+      console.error(err);
+      setCategories(previousCategories);
+      setError("Error al guardar el nuevo orden de categorías.");
+    }
+  };
+
   const handleAddCategory = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!categoriesRef) return;
@@ -179,7 +363,6 @@ const CategoriesView: React.FC = () => {
       });
 
       setNewCategoryName("");
-      // newCategoryOrder lo recalcula el listener
     } catch (err) {
       console.error(err);
       setError("Error al guardar.");
@@ -293,64 +476,39 @@ const CategoriesView: React.FC = () => {
                       <th className="px-6 py-3 font-semibold text-right">Acciones</th>
                     </tr>
                   </thead>
-                  <tbody className="divide-y divide-gray-100">
-                    {categories.map((cat) => (
-                      <tr key={cat.id} className="hover:bg-gray-50 transition-colors">
-                        <td className="px-6 py-4 text-sm text-gray-500">#{cat.order}</td>
-                        <td className="px-6 py-4 text-sm font-medium text-gray-900">{cat.name}</td>
-                        <td className="px-6 py-4 text-right">
-                          <div className="flex justify-end gap-2">
-                            <button
-                              onClick={() => copyCategoryUrl(cat)}
-                              className="text-gray-400 hover:text-blue-600 p-2"
-                              title="Copiar link"
-                            >
-                              <i className="fa-solid fa-link"></i>
-                            </button>
 
-                            <button
-                              onClick={() => shareCategoryOnWhatsApp(cat)}
-                              className="text-gray-400 hover:text-green-600 p-2"
-                              title="Compartir por WhatsApp"
-                            >
-                              <i className="fa-brands fa-whatsapp"></i>
-                            </button>
+                  <DndContext
+                    sensors={sensors}
+                    collisionDetection={closestCenter}
+                    onDragEnd={handleDragEnd}
+                  >
+                    <SortableContext
+                      items={categories.map((cat) => cat.id)}
+                      strategy={verticalListSortingStrategy}
+                    >
+                      <tbody className="divide-y divide-gray-100">
+                        {categories.map((cat) => (
+                          <SortableCategoryRow
+                            key={cat.id}
+                            cat={cat}
+                            onCopy={copyCategoryUrl}
+                            onWhatsApp={shareCategoryOnWhatsApp}
+                            onShare={shareCategory}
+                            onEdit={setEditingCategory}
+                            onDelete={handleDeleteCategory}
+                          />
+                        ))}
 
-                            <button
-                              onClick={() => shareCategory(cat)}
-                              className="text-gray-400 hover:text-indigo-600 p-2"
-                              title="Compartir en redes"
-                            >
-                              <i className="fa-solid fa-share-nodes"></i>
-                            </button>
-
-                            <button
-                              onClick={() => setEditingCategory(cat)}
-                              className="text-gray-400 hover:text-indigo-600 p-2"
-                              title="Editar"
-                            >
-                              <i className="fa-solid fa-pen-to-square"></i>
-                            </button>
-
-                            <button
-                              onClick={() => handleDeleteCategory(cat.id)}
-                              className="text-gray-400 hover:text-red-600 p-2"
-                              title="Eliminar"
-                            >
-                              <i className="fa-solid fa-trash-can"></i>
-                            </button>
-                          </div>
-                        </td>
-                      </tr>
-                    ))}
-                    {!categories.length ? (
-                      <tr>
-                        <td className="px-6 py-6 text-sm text-gray-400" colSpan={3}>
-                          Aún no hay categorías.
-                        </td>
-                      </tr>
-                    ) : null}
-                  </tbody>
+                        {!categories.length ? (
+                          <tr>
+                            <td className="px-6 py-6 text-sm text-gray-400" colSpan={3}>
+                              Aún no hay categorías.
+                            </td>
+                          </tr>
+                        ) : null}
+                      </tbody>
+                    </SortableContext>
+                  </DndContext>
                 </table>
               </div>
             </div>
@@ -358,7 +516,6 @@ const CategoriesView: React.FC = () => {
         </div>
       </div>
 
-      {/* Edit Modal */}
       {editingCategory && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
           <div
@@ -421,7 +578,10 @@ const CategoriesView: React.FC = () => {
       )}
 
       <style>{`
-        @keyframes scale-up { from { opacity: 0; transform: scale(0.95); } to { opacity: 1; transform: scale(1); } }
+        @keyframes scale-up { 
+          from { opacity: 0; transform: scale(0.95); } 
+          to { opacity: 1; transform: scale(1); } 
+        }
         .animate-scale-up { animation: scale-up 0.2s ease-out; }
       `}</style>
     </div>

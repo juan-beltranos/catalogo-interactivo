@@ -75,6 +75,7 @@ const CatalogView: React.FC = () => {
   const [allProducts, setAllProducts] = useState<Product[]>([]);
   const [allLoaded, setAllLoaded] = useState(false);
   const [searchLoading, setSearchLoading] = useState(false);
+  const [locationTooltipOpen, setLocationTooltipOpen] = useState(false);
 
   const isSearching = search.trim().length > 0;
 
@@ -593,10 +594,26 @@ const CatalogView: React.FC = () => {
                   ) : null}
 
                   {location ? (
-                    <span className="flex items-center gap-1 text-xs text-gray-500">
-                      <i className="fa-solid fa-location-dot text-sm text-red-400" />
-                      <span className="hidden sm:inline">{location}</span>
-                    </span>
+                    <div className="relative">
+                      <button
+                        type="button"
+                        onClick={() => setLocationTooltipOpen((prev) => !prev)}
+                        onBlur={() => setTimeout(() => setLocationTooltipOpen(false), 150)}
+                        className="flex items-center gap-1 text-xs text-gray-500 hover:text-red-500 transition"
+                        aria-label="Ver ubicación"
+                        title={location}
+                      >
+                        <i className="fa-solid fa-location-dot text-sm text-red-400" />
+                        <span className="hidden sm:inline">{location}</span>
+                      </button>
+
+                      {locationTooltipOpen ? (
+                        <div className="sm:hidden absolute left-1/2 -translate-x-1/2 top-full mt-2 z-50 w-56 rounded-xl bg-gray-900 px-3 py-2 text-xs font-semibold text-white shadow-lg">
+                          {location}
+                          <span className="absolute -top-1 left-1/2 -translate-x-1/2 h-2 w-2 rotate-45 bg-gray-900" />
+                        </div>
+                      ) : null}
+                    </div>
                   ) : null}
                 </div>
               </div>
