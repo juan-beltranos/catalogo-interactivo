@@ -1,4 +1,10 @@
-import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import React, {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import { useParams, useSearchParams } from "react-router-dom";
 import {
   collection,
@@ -19,10 +25,24 @@ import {
 import { db } from "../../lib/firebase";
 import { Product, Store } from "@/interfaces";
 import { CartItem, Category, Variant } from "@/types";
-import { buildWaLink, calcTotal, cartStorageKey, formatCOP, getProductDisplayPrice, getProductMainImage, norm } from "@/helpers";
+import {
+  buildWaLink,
+  calcTotal,
+  cartStorageKey,
+  formatCOP,
+  getProductDisplayPrice,
+  getProductMainImage,
+  norm,
+} from "@/helpers";
 import { ImageCarousel } from "@/components/catalog/ImageCarousel";
 import { cldImg } from "@/helpers/cloudinaryUpload";
-import { applyDiscount, discountBadgeText, getBaseUnitPrice, getFinalUnitPrice, getProductCardPrice } from "@/helpers/pricing";
+import {
+  applyDiscount,
+  discountBadgeText,
+  getBaseUnitPrice,
+  getFinalUnitPrice,
+  getProductCardPrice,
+} from "@/helpers/pricing";
 
 const PAGE_SIZE = 20;
 const ALL_BATCH = 500;
@@ -34,16 +54,63 @@ type PageCache = {
 };
 const catalogCache = new Map<string, Map<string, PageCache>>();
 
-const getCategoryCache = (storeId: string, categoryId: string): PageCache | null => {
+const getCategoryCache = (
+  storeId: string,
+  categoryId: string,
+): PageCache | null => {
   return catalogCache.get(storeId)?.get(categoryId) ?? null;
 };
-const setCategoryCache = (storeId: string, categoryId: string, data: PageCache) => {
+const setCategoryCache = (
+  storeId: string,
+  categoryId: string,
+  data: PageCache,
+) => {
   if (!catalogCache.has(storeId)) catalogCache.set(storeId, new Map());
   catalogCache.get(storeId)!.set(categoryId, data);
 };
-const clearStoreCache = (storeId: string) => { catalogCache.delete(storeId); };
+const clearStoreCache = (storeId: string) => {
+  catalogCache.delete(storeId);
+};
 const allProductsCache = new Map<string, Product[]>();
 
+// ── Helpers de envío ──────────────────────────────────────────────────────────
+
+type ShippingMethod = "cod" | "carrier";
+
+interface ShippingConfig {
+  enabled: boolean;
+  methods: ShippingMethod[];
+  costCOD: number;
+  costCarrier: number;
+  note: string;
+  hidePrices: boolean;
+}
+
+const getShippingConfig = (store: any): ShippingConfig => ({
+  enabled: store?.shippingEnabled ?? false,
+  methods: store?.shippingMethods ?? ["cod"],
+  costCOD: Number(store?.shippingCostCOD ?? 0),
+  costCarrier: Number(store?.shippingCostCarrier ?? 0),
+  note: store?.shippingNote ?? "",
+  hidePrices: store?.shippingHidePrices ?? false,
+});
+
+const SHIPPING_LABELS: Record<ShippingMethod, { label: string; icon: string; color: string; bg: string }> = {
+  cod: {
+    label: "Contra entrega",
+    icon: "fa-solid fa-money-bill-wave",
+    color: "text-green-600",
+    bg: "bg-green-100",
+  },
+  carrier: {
+    label: "Envío con transportadora",
+    icon: "fa-solid fa-truck",
+    color: "text-blue-600",
+    bg: "bg-blue-100",
+  },
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
 
 const CatalogView: React.FC = () => {
   const { slug } = useParams<{ slug: string }>();
@@ -62,6 +129,10 @@ const CatalogView: React.FC = () => {
   const [customerPhone, setCustomerPhone] = useState("");
   const [customerAddress, setCustomerAddress] = useState("");
   const [customerNotes, setCustomerNotes] = useState("");
+
+  // Envío
+  const [selectedShipping, setSelectedShipping] = useState<ShippingMethod | null>(null);
+
   const [activeCategoryId, setActiveCategoryId] = useState<string>("all");
   const categoryFromUrl = searchParams.get("category");
 
@@ -70,7 +141,8 @@ const CatalogView: React.FC = () => {
 
   const [loadingMore, setLoadingMore] = useState(false);
   const [hasMore, setHasMore] = useState(false);
-  const [lastDoc, setLastDoc] = useState<QueryDocumentSnapshot<DocumentData> | null>(null);
+  const [lastDoc, setLastDoc] =
+    useState<QueryDocumentSnapshot<DocumentData> | null>(null);
 
   const [allProducts, setAllProducts] = useState<Product[]>([]);
   const [allLoaded, setAllLoaded] = useState(false);
@@ -85,10 +157,34 @@ const CatalogView: React.FC = () => {
     selectedVariantId?: string | null;
   }>({ open: false, product: null, selectedVariantId: null });
 
-  // Nuevo: compartir
   const [shareToast, setShareToast] = useState(false);
 
-  const total = useMemo(() => calcTotal(cart), [cart]);
+  // ── Configuración de envío derivada del store ──
+  const shippingConfig = useMemo(() => getShippingConfig(store), [store]);
+
+  // Auto-seleccionar primer método si solo hay uno
+  useEffect(() => {
+    if (!shippingConfig.enabled) {
+      setSelectedShipping(null);
+      return;
+    }
+    if (shippingConfig.methods.length === 1) {
+      setSelectedShipping(shippingConfig.methods[0] as ShippingMethod);
+    } else {
+      setSelectedShipping(null);
+    }
+  }, [shippingConfig.enabled, shippingConfig.methods.join(",")]);
+
+  // Costo de envío según selección
+  const shippingCost = useMemo(() => {
+    if (!shippingConfig.enabled || !selectedShipping) return 0;
+    if (selectedShipping === "cod") return shippingConfig.costCOD;
+    if (selectedShipping === "carrier") return shippingConfig.costCarrier;
+    return 0;
+  }, [shippingConfig, selectedShipping]);
+
+  const subtotal = useMemo(() => calcTotal(cart), [cart]);
+  const total = useMemo(() => subtotal + shippingCost, [subtotal, shippingCost]);
 
   const categoryNameById = useMemo(() => {
     const map = new Map<string, string>();
@@ -122,9 +218,13 @@ const CatalogView: React.FC = () => {
     }
     return visible.filter((p) => {
       const catName = categoryNameById.get(p.categoryId) || "";
-      const variantsText = (p.variants || []).map((v: any) => `${v.title ?? ""} ${v.sku ?? ""}`).join(" ");
+      const variantsText = (p.variants || [])
+        .map((v: any) => `${v.title ?? ""} ${v.sku ?? ""}`)
+        .join(" ");
       const priceText = `${p.price ?? ""} ${(p.variants || []).map((v: any) => v.price ?? "").join(" ")}`;
-      const haystack = norm(`${p.name} ${p.sku ?? ""} ${p.description ?? ""} ${catName} ${variantsText} ${priceText}`);
+      const haystack = norm(
+        `${p.name} ${p.sku ?? ""} ${p.description ?? ""} ${catName} ${variantsText} ${priceText}`,
+      );
       return haystack.includes(q);
     });
   }, [search, allProducts, products, activeCategoryId, categoryNameById]);
@@ -134,7 +234,7 @@ const CatalogView: React.FC = () => {
     try {
       const raw = localStorage.getItem(cartStorageKey(slug));
       if (raw) setCart(JSON.parse(raw));
-    } catch { }
+    } catch {}
   }, [slug]);
 
   useEffect(() => {
@@ -146,7 +246,11 @@ const CatalogView: React.FC = () => {
     const fetchStoreBySlug = async () => {
       if (!slug) return;
       setLoading(true);
-      const qStore = query(collection(db, "stores"), where("slug", "==", slug), limit(1));
+      const qStore = query(
+        collection(db, "stores"),
+        where("slug", "==", slug),
+        limit(1),
+      );
       const snap = await getDocs(qStore);
       if (!snap.empty) {
         const storeDoc = snap.docs[0];
@@ -169,7 +273,10 @@ const CatalogView: React.FC = () => {
 
   useEffect(() => {
     if (!store) return;
-    const qCats = query(collection(db, "stores", store.id, "categories"), orderBy("order", "asc"));
+    const qCats = query(
+      collection(db, "stores", store.id, "categories"),
+      orderBy("order", "asc"),
+    );
     const unsubscribeCats = onSnapshot(qCats, (snap) => {
       setCategories(snap.docs.map((d) => ({ id: d.id, ...(d.data() as any) })));
     });
@@ -178,7 +285,10 @@ const CatalogView: React.FC = () => {
 
   useEffect(() => {
     if (!categories.length) return;
-    if (!categoryFromUrl) { setActiveCategoryId("all"); return; }
+    if (!categoryFromUrl) {
+      setActiveCategoryId("all");
+      return;
+    }
     const exists = categories.some((c) => c.id === categoryFromUrl);
     setActiveCategoryId(exists ? categoryFromUrl : "all");
   }, [categories, categoryFromUrl]);
@@ -196,12 +306,17 @@ const CatalogView: React.FC = () => {
       let acc: Product[] = [];
       let cursor: QueryDocumentSnapshot<DocumentData> | null = null;
       while (true) {
-        const constraints: any[] = [orderBy("createdAt", "desc"), limit(ALL_BATCH)];
+        const constraints: any[] = [
+          orderBy("createdAt", "desc"),
+          limit(ALL_BATCH),
+        ];
         if (cursor) constraints.splice(1, 0, startAfter(cursor));
         const qAll = query(baseRef, ...constraints);
         const snap = await getDocs(qAll);
         const docs = snap.docs;
-        acc = acc.concat(docs.map((d) => ({ id: d.id, ...(d.data() as any) })) as Product[]);
+        acc = acc.concat(
+          docs.map((d) => ({ id: d.id, ...(d.data() as any) })) as Product[],
+        );
         if (docs.length < ALL_BATCH) break;
         cursor = docs[docs.length - 1];
       }
@@ -211,7 +326,9 @@ const CatalogView: React.FC = () => {
       setAllLoaded(true);
     } catch (e: any) {
       console.error("fetchAllProductsOnce error:", e);
-      setQueryError("Error cargando productos para búsqueda. Revisa la consola.");
+      setQueryError(
+        "Error cargando productos para búsqueda. Revisa la consola.",
+      );
     } finally {
       setSearchLoading(false);
     }
@@ -225,47 +342,63 @@ const CatalogView: React.FC = () => {
     fetchAllProductsOnce(store.id);
   }, [store?.id, isSearching, fetchAllProductsOnce]);
 
-  const fetchFirstPage = useCallback(async (storeId: string, categoryId: string) => {
-    const cached = getCategoryCache(storeId, categoryId);
-    if (cached) {
-      setProducts(cached.products);
-      setHasMore(cached.hasMore);
-      setLastDoc(cached.lastDoc);
-      setLoading(false);
-      return;
-    }
-    setLoading(true);
-    setQueryError(null);
-    try {
-      const baseRef = collection(db, "stores", storeId, "products");
-      const constraints: any[] = [orderBy("createdAt", "desc"), limit(PAGE_SIZE + 1)];
-      if (categoryId !== "all") constraints.unshift(where("categoryId", "==", categoryId));
-      const qProds = query(baseRef, ...constraints);
-      const snap = await getDocs(qProds);
-      const docs = snap.docs;
-      const more = docs.length > PAGE_SIZE;
-      const pageDocs = more ? docs.slice(0, PAGE_SIZE) : docs;
-      const pageProducts = sortProducts(
-        pageDocs.map((d) => ({ id: d.id, ...(d.data() as any) })) as Product[]
-      );
-      const newLastDoc = pageDocs[pageDocs.length - 1] ?? null;
-      setCategoryCache(storeId, categoryId, { products: pageProducts, lastDoc: newLastDoc, hasMore: more });
-      setProducts(pageProducts);
-      setHasMore(more);
-      setLastDoc(newLastDoc);
-    } catch (e: any) {
-      console.error("fetchFirstPage error:", e);
-      const msg = String(e?.message || "").toLowerCase().includes("index")
-        ? "Falta un índice en Firestore para filtrar por categoría. Revisa la consola."
-        : "Error consultando productos. Revisa la consola.";
-      setQueryError(msg);
-      setProducts([]);
-      setHasMore(false);
-      setLastDoc(null);
-    } finally {
-      setLoading(false);
-    }
-  }, []);
+  const fetchFirstPage = useCallback(
+    async (storeId: string, categoryId: string) => {
+      const cached = getCategoryCache(storeId, categoryId);
+      if (cached) {
+        setProducts(cached.products);
+        setHasMore(cached.hasMore);
+        setLastDoc(cached.lastDoc);
+        setLoading(false);
+        return;
+      }
+      setLoading(true);
+      setQueryError(null);
+      try {
+        const baseRef = collection(db, "stores", storeId, "products");
+        const constraints: any[] = [
+          orderBy("createdAt", "desc"),
+          limit(PAGE_SIZE + 1),
+        ];
+        if (categoryId !== "all")
+          constraints.unshift(where("categoryId", "==", categoryId));
+        const qProds = query(baseRef, ...constraints);
+        const snap = await getDocs(qProds);
+        const docs = snap.docs;
+        const more = docs.length > PAGE_SIZE;
+        const pageDocs = more ? docs.slice(0, PAGE_SIZE) : docs;
+        const pageProducts = sortProducts(
+          pageDocs.map((d) => ({
+            id: d.id,
+            ...(d.data() as any),
+          })) as Product[],
+        );
+        const newLastDoc = pageDocs[pageDocs.length - 1] ?? null;
+        setCategoryCache(storeId, categoryId, {
+          products: pageProducts,
+          lastDoc: newLastDoc,
+          hasMore: more,
+        });
+        setProducts(pageProducts);
+        setHasMore(more);
+        setLastDoc(newLastDoc);
+      } catch (e: any) {
+        console.error("fetchFirstPage error:", e);
+        const msg = String(e?.message || "")
+          .toLowerCase()
+          .includes("index")
+          ? "Falta un índice en Firestore para filtrar por categoría. Revisa la consola."
+          : "Error consultando productos. Revisa la consola.";
+        setQueryError(msg);
+        setProducts([]);
+        setHasMore(false);
+        setLastDoc(null);
+      } finally {
+        setLoading(false);
+      }
+    },
+    [],
+  );
 
   const fetchMorePage = useCallback(async () => {
     if (!store || !lastDoc || !hasMore || loadingMore) return;
@@ -273,14 +406,22 @@ const CatalogView: React.FC = () => {
     setQueryError(null);
     try {
       const baseRef = collection(db, "stores", store.id, "products");
-      const constraints: any[] = [orderBy("createdAt", "desc"), startAfter(lastDoc), limit(PAGE_SIZE + 1)];
-      if (activeCategoryId !== "all") constraints.unshift(where("categoryId", "==", activeCategoryId));
+      const constraints: any[] = [
+        orderBy("createdAt", "desc"),
+        startAfter(lastDoc),
+        limit(PAGE_SIZE + 1),
+      ];
+      if (activeCategoryId !== "all")
+        constraints.unshift(where("categoryId", "==", activeCategoryId));
       const qMore = query(baseRef, ...constraints);
       const snap = await getDocs(qMore);
       const docs = snap.docs;
       const more = docs.length > PAGE_SIZE;
       const pageDocs = more ? docs.slice(0, PAGE_SIZE) : docs;
-      const newProducts = pageDocs.map((d) => ({ id: d.id, ...(d.data() as any) })) as Product[];
+      const newProducts = pageDocs.map((d) => ({
+        id: d.id,
+        ...(d.data() as any),
+      })) as Product[];
       const newLastDoc = pageDocs[pageDocs.length - 1] ?? lastDoc;
       setProducts((prev) => {
         const merged = sortProducts([...prev, ...newProducts]);
@@ -295,7 +436,9 @@ const CatalogView: React.FC = () => {
       setLastDoc(newLastDoc);
     } catch (e: any) {
       console.error("fetchMorePage error:", e);
-      const msg = String(e?.message || "").toLowerCase().includes("index")
+      const msg = String(e?.message || "")
+        .toLowerCase()
+        .includes("index")
         ? "Falta un índice en Firestore para paginar. Revisa la consola."
         : "Error cargando más productos. Revisa la consola.";
       setQueryError(msg);
@@ -312,7 +455,10 @@ const CatalogView: React.FC = () => {
   useEffect(() => {
     if (!store) return;
     const cached = allProductsCache.get(store.id);
-    if (cached) { setAllProducts(cached); setAllLoaded(true); }
+    if (cached) {
+      setAllProducts(cached);
+      setAllLoaded(true);
+    }
   }, [store?.id]);
 
   const addToCart = (prod: Product, variant?: Variant) => {
@@ -335,7 +481,11 @@ const CatalogView: React.FC = () => {
       imageUrl: getProductMainImage(prod),
     };
     setCart((prev) => {
-      const idx = prev.findIndex((x) => x.productId === item.productId && (x.variantId || "") === (item.variantId || ""));
+      const idx = prev.findIndex(
+        (x) =>
+          x.productId === item.productId &&
+          (x.variantId || "") === (item.variantId || ""),
+      );
       if (idx >= 0) {
         const next = [...prev];
         next[idx] = { ...next[idx], qty: next[idx].qty + 1 };
@@ -351,8 +501,8 @@ const CatalogView: React.FC = () => {
       const it = next[index];
       if (!it) return prev;
       const q = it.qty + delta;
-      const prod = products.find(p => p.id === it.productId);
-      const v = prod?.variants?.find(vv => vv.id === it.variantId);
+      const prod = products.find((p) => p.id === it.productId);
+      const v = prod?.variants?.find((vv) => vv.id === it.variantId);
       const maxStock = v && typeof v.stock === "number" ? v.stock : undefined;
       if (maxStock !== undefined && q > maxStock) return prev;
       if (q <= 0) next.splice(index, 1);
@@ -376,8 +526,16 @@ const CatalogView: React.FC = () => {
     if (!cleanName) return alert("Escribe tu nombre.");
     if (!cleanPhone) return alert("Escribe tu teléfono.");
     if (!cleanAddress) return alert("Escribe tu dirección.");
-    if (!/^\d{7,15}$/.test(cleanPhone)) return alert("Teléfono inválido. Usa solo números.");
-    if (!store.whatsapp) return alert("Esta tienda no tiene WhatsApp configurado.");
+    if (!/^\d{7,15}$/.test(cleanPhone))
+      return alert("Teléfono inválido. Usa solo números.");
+    if (!store.whatsapp)
+      return alert("Esta tienda no tiene WhatsApp configurado.");
+
+    // Validar método de envío si está habilitado
+    if (shippingConfig.enabled && shippingConfig.methods.length > 1 && !selectedShipping) {
+      return alert("Selecciona un método de envío.");
+    }
+
     setPlacingOrder(true);
     try {
       const items = cart.map((it) => ({
@@ -389,18 +547,113 @@ const CatalogView: React.FC = () => {
         qty: it.qty,
         subtotal: it.unitPrice * it.qty,
       }));
-      const orderTotal = calcTotal(cart);
+
+      const orderTotal = total; // ya incluye envío
       const clientRef = doc(db, "stores", store.id, "clients", cleanPhone);
       const orderRef = doc(collection(db, "stores", store.id, "orders"));
+
       await runTransaction(db, async (tx) => {
-        const clientSnap = await tx.get(clientRef);
-        if (!clientSnap.exists()) {
-          tx.set(clientRef, { name: cleanName, phone: cleanPhone, address: cleanAddress, notes: "", createdAt: serverTimestamp(), updatedAt: serverTimestamp(), lastOrderAt: serverTimestamp(), totalOrders: 1, totalSpent: orderTotal });
-        } else {
-          tx.update(clientRef, { name: cleanName, address: cleanAddress, updatedAt: serverTimestamp(), lastOrderAt: serverTimestamp(), totalOrders: increment(1), totalSpent: increment(orderTotal) });
+        const productSnaps: any[] = [];
+
+        for (const item of cart) {
+          const productRef = doc(
+            db,
+            "stores",
+            store.id,
+            "products",
+            item.productId,
+          );
+          const snap = await tx.get(productRef);
+
+          if (!snap.exists()) {
+            throw new Error(`Producto no existe: ${item.productName}`);
+          }
+
+          productSnaps.push({
+            item,
+            ref: productRef,
+            data: snap.data(),
+          });
         }
-        tx.set(orderRef, { status: "new", channel: "whatsapp", clientId: cleanPhone, customer: { name: cleanName, phone: cleanPhone, address: cleanAddress }, notes: customerNotes.trim() || "", items, total: orderTotal, createdAt: serverTimestamp(), updatedAt: serverTimestamp() });
+
+        const clientSnap = await tx.get(clientRef);
+
+        const updates: { ref: any; data: any }[] = [];
+
+        for (const { item, ref, data } of productSnaps) {
+          if (item.variantId) {
+            const variants = data.variants || [];
+            const i = variants.findIndex((v: any) => v.id === item.variantId);
+            if (i === -1) throw new Error(`Variante no encontrada`);
+            const variant = variants[i];
+            if (typeof variant.stock === "number") {
+              if (variant.stock < item.qty) {
+                throw new Error(`Stock insuficiente para ${item.productName}`);
+              }
+              variants[i].stock = variant.stock - item.qty;
+            }
+            updates.push({ ref, data: { variants } });
+          } else {
+            if (typeof data.stock === "number") {
+              if (data.stock < item.qty) {
+                throw new Error(`Stock insuficiente para ${item.productName}`);
+              }
+              updates.push({
+                ref,
+                data: { stock: data.stock - item.qty },
+              });
+            }
+          }
+        }
+
+        updates.forEach((u) => {
+          tx.update(u.ref, u.data);
+        });
+
+        if (!clientSnap.exists()) {
+          tx.set(clientRef, {
+            name: cleanName,
+            phone: cleanPhone,
+            address: cleanAddress,
+            notes: "",
+            createdAt: serverTimestamp(),
+            updatedAt: serverTimestamp(),
+            lastOrderAt: serverTimestamp(),
+            totalOrders: 1,
+            totalSpent: orderTotal,
+          });
+        } else {
+          tx.update(clientRef, {
+            name: cleanName,
+            address: cleanAddress,
+            updatedAt: serverTimestamp(),
+            lastOrderAt: serverTimestamp(),
+            totalOrders: increment(1),
+            totalSpent: increment(orderTotal),
+          });
+        }
+
+        tx.set(orderRef, {
+          status: "new",
+          channel: "whatsapp",
+          clientId: cleanPhone,
+          customer: {
+            name: cleanName,
+            phone: cleanPhone,
+            address: cleanAddress,
+          },
+          notes: customerNotes.trim() || "",
+          items,
+          subtotal,
+          shippingMethod: selectedShipping ?? null,
+          shippingCost,
+          total: orderTotal,
+          createdAt: serverTimestamp(),
+          updatedAt: serverTimestamp(),
+        });
       });
+
+      // Mensaje de WhatsApp
       const lines: string[] = [];
       lines.push("🛒 *Nuevo pedido*");
       lines.push(`Tienda: *${store.name}*`);
@@ -414,10 +667,18 @@ const CatalogView: React.FC = () => {
       lines.push("📦 *Productos*:");
       cart.forEach((it) => {
         const v = it.variantTitle ? ` (${it.variantTitle})` : "";
-        lines.push(`- ${it.qty} x ${it.productName}${v} — ${formatCOP(it.unitPrice * it.qty)}`);
+        lines.push(
+          `- ${it.qty} x ${it.productName}${v} — ${formatCOP(it.unitPrice * it.qty)}`,
+        );
       });
       lines.push("");
+      lines.push(`🧾 Subtotal: ${formatCOP(subtotal)}`);
+      if (shippingConfig.enabled && selectedShipping) {
+        const label = SHIPPING_LABELS[selectedShipping].label;
+        lines.push(`🚚 Envío (${label}): ${shippingCost === 0 ? "Gratis" : formatCOP(shippingCost)}`);
+      }
       lines.push(`💰 *Total:* ${formatCOP(orderTotal)}`);
+
       const waUrl = buildWaLink(store.whatsapp, lines.join("\n"));
       clearCart();
       setCheckoutOpen(false);
@@ -444,11 +705,12 @@ const CatalogView: React.FC = () => {
     setSearchParams(next, { replace: true });
   };
 
-  // Compartir catálogo
   const handleShare = async () => {
     const url = window.location.href;
     if (navigator.share) {
-      try { await navigator.share({ title: store?.name, url }); } catch { }
+      try {
+        await navigator.share({ title: store?.name, url });
+      } catch {}
     } else {
       await navigator.clipboard.writeText(url);
       setShareToast(true);
@@ -456,7 +718,6 @@ const CatalogView: React.FC = () => {
     }
   };
 
-  // Leer campos nuevos del store de forma segura
   const brandColor = (store as any)?.brandColor || "#111111";
   const bannerUrl = (store as any)?.bannerUrl || "";
   const instagram = (store as any)?.instagram || "";
@@ -466,12 +727,21 @@ const CatalogView: React.FC = () => {
   const location = (store as any)?.location || "";
   const description = (store as any)?.description || store?.address || "";
 
-  if (loading) return <div className="h-screen flex items-center justify-center text-gray-500">Cargando catálogo...</div>;
-  if (!store) return <div className="h-screen flex items-center justify-center text-gray-500">Tienda no encontrada.</div>;
+  if (loading)
+    return (
+      <div className="h-screen flex items-center justify-center text-gray-500">
+        Cargando catálogo...
+      </div>
+    );
+  if (!store)
+    return (
+      <div className="h-screen flex items-center justify-center text-gray-500">
+        Tienda no encontrada.
+      </div>
+    );
 
   return (
     <div className="min-h-screen bg-gray-50 pb-28">
-
       {/* ── Toast compartir ── */}
       {shareToast && (
         <div className="fixed top-4 left-1/2 -translate-x-1/2 z-[200] bg-gray-900 text-white text-sm font-semibold px-5 py-2.5 rounded-full shadow-lg">
@@ -479,28 +749,37 @@ const CatalogView: React.FC = () => {
         </div>
       )}
 
-      {/* ── Hero: Banner + info tienda ── */}
+      {/* ── Hero ── */}
       <div className="relative">
-        {/* Banner */}
         {bannerUrl ? (
           <div className="w-full h-40 sm:h-52 overflow-hidden bg-gray-200">
-            <img src={bannerUrl} alt={`Banner ${store.name}`} className="w-full h-full object-cover" />
+            <img
+              src={bannerUrl}
+              alt={`Banner ${store.name}`}
+              className="w-full h-full object-cover"
+            />
             <div className="absolute inset-0 h-40 sm:h-52 bg-gradient-to-t from-black/50 to-transparent" />
           </div>
         ) : (
-          <div className="w-full h-24 sm:h-32" style={{ background: brandColor, opacity: 0.15 }} />
+          <div
+            className="w-full h-24 sm:h-32"
+            style={{ background: brandColor, opacity: 0.15 }}
+          />
         )}
 
-        {/* Card de info tienda */}
-        <div className={`relative max-w-6xl mx-auto px-4 ${bannerUrl ? "-mt-10" : "-mt-4"}`}>
+        <div
+          className={`relative max-w-6xl mx-auto px-4 ${bannerUrl ? "-mt-10" : "-mt-4"}`}
+        >
           <div className="bg-white rounded-2xl border border-gray-100 shadow-sm p-4 sm:p-5">
             <div className="flex items-start gap-4">
-
-              {/* Logo */}
               <div className="shrink-0 -mt-10 sm:-mt-12">
                 {store.logoUrl ? (
                   <div className="h-16 w-16 sm:h-20 sm:w-20 rounded-2xl bg-white border-2 border-white shadow-md overflow-hidden">
-                    <img src={store.logoUrl} alt={`Logo ${store.name}`} className="h-full w-full object-cover" />
+                    <img
+                      src={store.logoUrl}
+                      alt={`Logo ${store.name}`}
+                      className="h-full w-full object-cover"
+                    />
                   </div>
                 ) : (
                   <div
@@ -512,7 +791,6 @@ const CatalogView: React.FC = () => {
                 )}
               </div>
 
-              {/* Nombre + estado + descripción */}
               <div className="flex-1 min-w-0 pt-1">
                 <div className="flex flex-wrap items-center gap-2">
                   <h1 className="font-extrabold text-lg sm:text-2xl text-gray-900 leading-tight truncate">
@@ -532,10 +810,11 @@ const CatalogView: React.FC = () => {
                 </div>
 
                 {description ? (
-                  <p className="text-sm text-gray-500 mt-1 line-clamp-2">{description}</p>
+                  <p className="text-sm text-gray-500 mt-1 line-clamp-2">
+                    {description}
+                  </p>
                 ) : null}
 
-                {/* Redes sociales y contacto */}
                 <div className="flex flex-wrap items-center gap-3 mt-2">
                   {instagram ? (
                     <a
@@ -569,7 +848,9 @@ const CatalogView: React.FC = () => {
                       className="flex items-center gap-1 text-xs text-gray-500 hover:text-green-600 transition"
                     >
                       <i className="fa-brands fa-whatsapp text-sm" />
-                      <span className="hidden sm:inline">+{store.whatsapp}</span>
+                      <span className="hidden sm:inline">
+                        +{store.whatsapp}
+                      </span>
                     </a>
                   ) : null}
 
@@ -598,7 +879,9 @@ const CatalogView: React.FC = () => {
                       <button
                         type="button"
                         onClick={() => setLocationTooltipOpen((prev) => !prev)}
-                        onBlur={() => setTimeout(() => setLocationTooltipOpen(false), 150)}
+                        onBlur={() =>
+                          setTimeout(() => setLocationTooltipOpen(false), 150)
+                        }
                         className="flex items-center gap-1 text-xs text-gray-500 hover:text-red-500 transition"
                         aria-label="Ver ubicación"
                         title={location}
@@ -618,7 +901,6 @@ const CatalogView: React.FC = () => {
                 </div>
               </div>
 
-              {/* Botones de acción */}
               <div className="flex flex-col sm:flex-row items-end gap-2 shrink-0">
                 <button
                   onClick={handleShare}
@@ -636,7 +918,10 @@ const CatalogView: React.FC = () => {
                   <i className="fa-solid fa-cart-shopping" />
                   <span className="hidden sm:inline">Carrito</span>
                   {cart.length > 0 ? (
-                    <span className="inline-flex items-center justify-center min-w-5 h-5 px-1.5 rounded-full bg-white text-[10px] font-black" style={{ color: brandColor }}>
+                    <span
+                      className="inline-flex items-center justify-center min-w-5 h-5 px-1.5 rounded-full bg-white text-[10px] font-black"
+                      style={{ color: brandColor }}
+                    >
                       {cart.reduce((a, b) => a + b.qty, 0)}
                     </span>
                   ) : null}
@@ -685,7 +970,6 @@ const CatalogView: React.FC = () => {
 
       {/* ── Content ── */}
       <main className="max-w-6xl mx-auto px-4 py-6 space-y-5">
-        {/* Buscador */}
         <div className="relative">
           <i className="fa-solid fa-magnifying-glass absolute left-3 top-1/2 -translate-y-1/2 text-gray-400 text-sm" />
           <input
@@ -696,14 +980,21 @@ const CatalogView: React.FC = () => {
             style={{ "--tw-ring-color": brandColor + "55" } as any}
           />
           {search.trim() ? (
-            <button type="button" onClick={() => setSearch("")} className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-700" aria-label="Limpiar">
+            <button
+              type="button"
+              onClick={() => setSearch("")}
+              className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-700"
+              aria-label="Limpiar"
+            >
               <i className="fa-solid fa-xmark" />
             </button>
           ) : null}
         </div>
 
         {isSearching && !allLoaded ? (
-          <div className="text-sm text-gray-500">{searchLoading ? "Preparando búsqueda..." : "Cargando productos..."}</div>
+          <div className="text-sm text-gray-500">
+            {searchLoading ? "Preparando búsqueda..." : "Cargando productos..."}
+          </div>
         ) : null}
 
         <div className="flex items-center justify-between">
@@ -713,17 +1004,23 @@ const CatalogView: React.FC = () => {
               : `Categoría: ${categories.find((c) => c.id === activeCategoryId)?.name || ""}`}
           </div>
           {activeCategoryId !== "all" ? (
-            <button type="button" onClick={() => handleCategoryChange("all")} className="text-sm font-extrabold hover:opacity-70" style={{ color: brandColor }}>
+            <button
+              type="button"
+              onClick={() => handleCategoryChange("all")}
+              className="text-sm font-extrabold hover:opacity-70"
+              style={{ color: brandColor }}
+            >
               Ver todo
             </button>
           ) : null}
         </div>
 
         {queryError ? (
-          <div className="bg-red-50 border border-red-200 rounded-2xl p-4 text-sm text-red-700">{queryError}</div>
+          <div className="bg-red-50 border border-red-200 rounded-2xl p-4 text-sm text-red-700">
+            {queryError}
+          </div>
         ) : null}
 
-        {/* Grid productos */}
         {filteredProducts.length === 0 ? (
           <div className="bg-white border border-gray-100 rounded-2xl p-6 text-gray-500 shadow-sm">
             No hay productos en esta categoría.
@@ -732,7 +1029,9 @@ const CatalogView: React.FC = () => {
           <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-3 sm:gap-4">
             {filteredProducts.map((prod) => {
               const img = getProductMainImage(prod);
-              const imgOptim = img ? cldImg(img, { w: 600, h: 600, crop: "fill" }) : "";
+              const imgOptim = img
+                ? cldImg(img, { w: 600, h: 600, crop: "fill" })
+                : "";
               const hasVariants = (prod.variants?.length ?? 0) > 0;
               const badge = discountBadgeText((prod as any).discount);
               const discOk = hasValidDiscount(prod);
@@ -750,7 +1049,13 @@ const CatalogView: React.FC = () => {
                     aria-label={`Ver ${prod.name}`}
                   >
                     {img ? (
-                      <img src={imgOptim} alt={prod.name} className="relative z-10 h-full w-full object-contain" loading="lazy" decoding="async" />
+                      <img
+                        src={imgOptim}
+                        alt={prod.name}
+                        className="relative z-10 h-full w-full object-contain"
+                        loading="lazy"
+                        decoding="async"
+                      />
                     ) : (
                       <div className="h-full w-full flex items-center justify-center text-gray-400">
                         <i className="fa-regular fa-image text-2xl" />
@@ -758,7 +1063,9 @@ const CatalogView: React.FC = () => {
                     )}
                     {badge ? (
                       <div className="absolute top-3 left-3 z-20 pointer-events-none">
-                        <span className="inline-flex items-center rounded-full bg-yellow-400 text-white px-3 py-1 text-xs font-extrabold shadow-sm">{badge}</span>
+                        <span className="inline-flex items-center rounded-full bg-yellow-400 text-white px-3 py-1 text-xs font-extrabold shadow-sm">
+                          {badge}
+                        </span>
                       </div>
                     ) : null}
                   </button>
@@ -766,7 +1073,9 @@ const CatalogView: React.FC = () => {
                   <div className="p-3 sm:p-4 flex-1 flex flex-col">
                     <div className="flex flex-col gap-1">
                       <div className="flex items-start justify-between gap-2">
-                        <h3 className="text-sm sm:text-[15px] font-extrabold text-gray-900">{prod.name}</h3>
+                        <h3 className="text-sm sm:text-[15px] font-extrabold text-gray-900">
+                          {prod.name}
+                        </h3>
                         {prod.sku ? (
                           <span className="hidden sm:inline-flex shrink-0 text-[10px] font-bold text-gray-500 bg-gray-100 border border-gray-200 rounded-full px-2 py-1">
                             SKU: {prod.sku}
@@ -781,24 +1090,34 @@ const CatalogView: React.FC = () => {
                     </div>
 
                     {prod.description ? (
-                      <p className="text-xs text-gray-500 mt-1 line-clamp-2">{prod.description}</p>
+                      <p className="text-xs text-gray-500 mt-1 line-clamp-2">
+                        {prod.description}
+                      </p>
                     ) : (
-                      <p className="text-xs text-gray-400 mt-1 line-clamp-2">&nbsp;</p>
+                      <p className="text-xs text-gray-400 mt-1 line-clamp-2">
+                        &nbsp;
+                      </p>
                     )}
 
                     <div className="mt-2">
                       {discOk ? (
                         <div className="flex items-baseline gap-2">
                           <span className="text-xs text-gray-400 line-through font-bold">
-                            {cardPrice.hasVariants ? `Desde ${formatCOP(cardPrice.base)}` : formatCOP(cardPrice.base)}
+                            {cardPrice.hasVariants
+                              ? `Desde ${formatCOP(cardPrice.base)}`
+                              : formatCOP(cardPrice.base)}
                           </span>
                           <span className="text-sm font-extrabold">
-                            {cardPrice.hasVariants ? `Desde ${formatCOP(cardPrice.final)}` : formatCOP(cardPrice.final)}
+                            {cardPrice.hasVariants
+                              ? `Desde ${formatCOP(cardPrice.final)}`
+                              : formatCOP(cardPrice.final)}
                           </span>
                         </div>
                       ) : (
                         <div className="text-sm font-extrabold">
-                          {cardPrice.hasVariants ? `Desde ${formatCOP(cardPrice.base)}` : formatCOP(cardPrice.base)}
+                          {cardPrice.hasVariants
+                            ? `Desde ${formatCOP(cardPrice.base)}`
+                            : formatCOP(cardPrice.base)}
                         </div>
                       )}
                     </div>
@@ -838,10 +1157,15 @@ const CatalogView: React.FC = () => {
 
       {/* ── Bottom CTA ── */}
       {cart.length > 0 && (
-        <div className="fixed bottom-4 left-1/2 -translate-x-1/2 w-[92%] max-w-md text-white p-4 rounded-2xl shadow-2xl flex justify-between items-center z-50" style={{ background: brandColor }}>
+        <div
+          className="fixed bottom-4 left-1/2 -translate-x-1/2 w-[92%] max-w-md text-white p-4 rounded-2xl shadow-2xl flex justify-between items-center z-50"
+          style={{ background: brandColor }}
+        >
           <div>
-            <div className="font-extrabold">{cart.reduce((a, b) => a + b.qty, 0)} items</div>
-            <div className="text-xs opacity-80">{formatCOP(total)}</div>
+            <div className="font-extrabold">
+              {cart.reduce((a, b) => a + b.qty, 0)} items
+            </div>
+            <div className="text-xs opacity-80">{formatCOP(subtotal)}</div>
           </div>
           <button
             onClick={() => setCheckoutOpen(true)}
@@ -859,10 +1183,14 @@ const CatalogView: React.FC = () => {
           <div className="bg-white w-full sm:max-w-lg rounded-t-3xl sm:rounded-3xl overflow-hidden shadow-xl">
             <div className="p-4 sm:p-6 border-b flex items-start justify-between gap-3">
               <div className="min-w-0 flex-1">
-                <div className="text-lg sm:text-xl font-extrabold text-gray-900 break-words">{productModal.product.name}</div>
+                <div className="text-lg sm:text-xl font-extrabold text-gray-900 break-words">
+                  {productModal.product.name}
+                </div>
               </div>
               <button
-                onClick={() => setProductModal({ open: false, product: null, selectedVariantId: null })}
+                onClick={() =>
+                  setProductModal({ open: false, product: null, selectedVariantId: null })
+                }
                 className="h-10 w-10 rounded-full border flex items-center justify-center hover:bg-gray-50 shrink-0"
                 aria-label="Cerrar"
               >
@@ -872,7 +1200,9 @@ const CatalogView: React.FC = () => {
 
             <div className="p-4 sm:p-6 space-y-4 max-h-[75vh] overflow-auto">
               <ImageCarousel
-                images={(productModal.product.images || []).map((x: any) => x.url).filter(Boolean)}
+                images={(productModal.product.images || [])
+                  .map((x: any) => x.url)
+                  .filter(Boolean)}
                 alt={productModal.product.name}
               />
 
@@ -890,7 +1220,10 @@ const CatalogView: React.FC = () => {
                   <div className="text-sm font-extrabold text-gray-900">Videos</div>
                   <div className="grid grid-cols-1 gap-3">
                     {productModal.product.videos!.map((v: any) => (
-                      <div key={v.path || v.url} className="rounded-2xl overflow-hidden border bg-black">
+                      <div
+                        key={v.path || v.url}
+                        className="rounded-2xl overflow-hidden border bg-black"
+                      >
                         <video src={v.url} controls className="w-full h-56 object-contain" />
                       </div>
                     ))}
@@ -907,11 +1240,21 @@ const CatalogView: React.FC = () => {
                       {hasValidDiscount(productModal.product) ? (
                         <div className="flex items-baseline gap-2">
                           <span className="text-xs text-gray-400 line-through font-bold">
-                            {modalPrice.hasVariants ? `Desde ${formatCOP(modalPrice.base)}` : formatCOP(modalPrice.base)}
+                            {modalPrice.hasVariants
+                              ? `Desde ${formatCOP(modalPrice.base)}`
+                              : formatCOP(modalPrice.base)}
                           </span>
-                          <span>{modalPrice.hasVariants ? `Desde ${formatCOP(modalPrice.final)}` : formatCOP(modalPrice.final)}</span>
+                          <span>
+                            {modalPrice.hasVariants
+                              ? `Desde ${formatCOP(modalPrice.final)}`
+                              : formatCOP(modalPrice.final)}
+                          </span>
                         </div>
-                      ) : modalPrice.hasVariants ? `Desde ${formatCOP(modalPrice.base)}` : formatCOP(modalPrice.base)}
+                      ) : modalPrice.hasVariants ? (
+                        `Desde ${formatCOP(modalPrice.base)}`
+                      ) : (
+                        formatCOP(modalPrice.base)
+                      )}
                     </div>
                   );
                 })()}
@@ -932,24 +1275,31 @@ const CatalogView: React.FC = () => {
                           key={v.id}
                           type="button"
                           disabled={outOfStock}
-                          onClick={() => setProductModal((pm) => ({ ...pm, selectedVariantId: v.id }))}
+                          onClick={() =>
+                            setProductModal((pm) => ({ ...pm, selectedVariantId: v.id }))
+                          }
                           className={`w-full rounded-2xl p-4 border flex items-center justify-between text-left transition
                           ${outOfStock ? "opacity-50 cursor-not-allowed bg-gray-50" : "bg-white hover:bg-gray-50"}`}
-                          style={selected ? { borderColor: brandColor, boxShadow: `0 0 0 2px ${brandColor}22` } : {}}
+                          style={
+                            selected
+                              ? { borderColor: brandColor, boxShadow: `0 0 0 2px ${brandColor}22` }
+                              : {}
+                          }
                         >
                           <div>
                             <div className="font-extrabold text-gray-900">{v.title}</div>
-                            <div className="text-xs text-gray-500 mt-1">
-                              {typeof v.stock === "number" ? (outOfStock ? "Agotado" : `Stock: ${v.stock}`) : "Stock no definido"}
-                            </div>
                           </div>
                           <div className="font-extrabold">
                             {hasValidDiscount(productModal.product) ? (
                               <div className="flex items-baseline gap-2">
-                                <span className="text-xs text-gray-400 line-through font-bold">{formatCOP(base)}</span>
+                                <span className="text-xs text-gray-400 line-through font-bold">
+                                  {formatCOP(base)}
+                                </span>
                                 <span>{formatCOP(final)}</span>
                               </div>
-                            ) : formatCOP(base)}
+                            ) : (
+                              formatCOP(base)
+                            )}
                           </div>
                         </button>
                       );
@@ -981,7 +1331,9 @@ const CatalogView: React.FC = () => {
               </button>
               <button
                 type="button"
-                onClick={() => setProductModal({ open: false, product: null, selectedVariantId: null })}
+                onClick={() =>
+                  setProductModal({ open: false, product: null, selectedVariantId: null })
+                }
                 className="w-full rounded-2xl py-3 font-extrabold border hover:bg-gray-50 mt-2"
               >
                 Cancelar
@@ -998,7 +1350,9 @@ const CatalogView: React.FC = () => {
             <div className="p-4 sm:p-6 border-b flex items-start justify-between gap-3">
               <div>
                 <div className="text-xl font-extrabold text-gray-900">Tu pedido</div>
-                <div className="text-sm text-gray-500">Completa tus datos y envía por WhatsApp</div>
+                <div className="text-sm text-gray-500">
+                  Completa tus datos y envía por WhatsApp
+                </div>
               </div>
               <button
                 onClick={() => setCheckoutOpen(false)}
@@ -1009,38 +1363,73 @@ const CatalogView: React.FC = () => {
               </button>
             </div>
 
-            <div className="p-4 sm:p-6 overflow-auto max-h-[70vh]">
+            <div className="p-4 sm:p-6 overflow-auto max-h-[70vh] space-y-5">
+
+              {/* Items del carrito */}
               <div className="space-y-3">
                 {cart.length === 0 ? (
                   <div className="text-gray-400">Tu carrito está vacío.</div>
                 ) : (
                   cart.map((it, idx) => (
-                    <div key={`${it.productId}:${it.variantId || "base"}`} className="flex gap-3 border border-gray-100 rounded-2xl p-3 shadow-sm">
+                    <div
+                      key={`${it.productId}:${it.variantId || "base"}`}
+                      className="flex gap-3 border border-gray-100 rounded-2xl p-3 shadow-sm"
+                    >
                       <div className="w-16 h-16 rounded-2xl bg-gray-100 overflow-hidden border relative">
                         {it.imageUrl ? (
-                          <img src={cldImg(it.imageUrl, { w: 160, h: 160, crop: "fill" })} alt={it.productName} className="relative z-10 w-full h-full object-contain" loading="lazy" />
+                          <img
+                            src={cldImg(it.imageUrl, { w: 160, h: 160, crop: "fill" })}
+                            alt={it.productName}
+                            className="relative z-10 w-full h-full object-contain"
+                            loading="lazy"
+                          />
                         ) : (
-                          <div className="w-full h-full flex items-center justify-center text-gray-400"><i className="fa-regular fa-image text-sm" /></div>
+                          <div className="w-full h-full flex items-center justify-center text-gray-400">
+                            <i className="fa-regular fa-image text-sm" />
+                          </div>
                         )}
                       </div>
                       <div className="flex-1 min-w-0">
-                        <div className="font-extrabold text-gray-900 truncate">{it.productName}</div>
-                        {it.variantTitle ? <div className="text-xs text-gray-500">{it.variantTitle}</div> : null}
+                        <div className="font-extrabold text-gray-900 truncate">
+                          {it.productName}
+                        </div>
+                        {it.variantTitle ? (
+                          <div className="text-xs text-gray-500">{it.variantTitle}</div>
+                        ) : null}
                         <div className="text-sm font-extrabold mt-1">
-                          {typeof it.originalUnitPrice === "number" && it.originalUnitPrice > it.unitPrice ? (
+                          {typeof it.originalUnitPrice === "number" &&
+                          it.originalUnitPrice > it.unitPrice ? (
                             <div className="flex items-baseline gap-2">
-                              <span className="text-xs text-gray-400 line-through font-bold">{formatCOP(it.originalUnitPrice)}</span>
+                              <span className="text-xs text-gray-400 line-through font-bold">
+                                {formatCOP(it.originalUnitPrice)}
+                              </span>
                               <span>{formatCOP(it.unitPrice)}</span>
                             </div>
-                          ) : formatCOP(it.unitPrice)}
+                          ) : (
+                            formatCOP(it.unitPrice)
+                          )}
                         </div>
-                        <div className="text-xs text-gray-500 mt-1">Subtotal: <b>{formatCOP(it.unitPrice * it.qty)}</b></div>
+                        <div className="text-xs text-gray-500 mt-1">
+                          Subtotal: <b>{formatCOP(it.unitPrice * it.qty)}</b>
+                        </div>
                       </div>
                       <div className="flex flex-col items-end justify-between">
                         <div className="flex items-center gap-2">
-                          <button className="w-9 h-9 rounded-xl border hover:bg-gray-50" onClick={() => changeQty(idx, -1)} type="button"><i className="fa-solid fa-minus text-xs" /></button>
+                          <button
+                            className="w-9 h-9 rounded-xl border hover:bg-gray-50"
+                            onClick={() => changeQty(idx, -1)}
+                            type="button"
+                          >
+                            <i className="fa-solid fa-minus text-xs" />
+                          </button>
                           <div className="w-6 text-center font-extrabold">{it.qty}</div>
-                          <button className="w-9 h-9 rounded-xl border hover:bg-gray-50" onClick={() => changeQty(idx, +1)} type="button"><i className="fa-solid fa-plus text-xs" /></button>
+                          <button
+                            className="w-9 h-9 rounded-xl border hover:bg-gray-50"
+                            onClick={() => changeQty(idx, +1)}
+                            type="button"
+                          >
+                            <i className="fa-solid fa-plus text-xs" />
+                          </button>
                         </div>
                       </div>
                     </div>
@@ -1048,31 +1437,145 @@ const CatalogView: React.FC = () => {
                 )}
               </div>
 
-              {cart.length > 0 ? (
-                <div className="mt-5 flex items-center justify-between border-t pt-4">
-                  <div className="font-extrabold text-gray-900">Total</div>
-                  <div className="font-black text-lg">{formatCOP(total)}</div>
-                </div>
-              ) : null}
+              {/* ── Método de envío (NUEVO) ── */}
+              {shippingConfig.enabled && shippingConfig.methods.length > 0 && (
+                <div className="space-y-3">
+                  <div className="text-sm font-extrabold text-gray-900 flex items-center gap-2">
+                    <i className="fa-solid fa-truck text-gray-400" />
+                    Método de envío
+                  </div>
 
-              <div className="mt-6 space-y-3">
+                  <div className="grid grid-cols-1 gap-2">
+                    {shippingConfig.methods.map((method) => {
+                      const meta = SHIPPING_LABELS[method as ShippingMethod];
+                      const cost = method === "cod" ? shippingConfig.costCOD : shippingConfig.costCarrier;
+                      const isSelected = selectedShipping === method;
+
+                      return (
+                        <button
+                          key={method}
+                          type="button"
+                          onClick={() => setSelectedShipping(method as ShippingMethod)}
+                          className="w-full rounded-2xl border-2 p-3.5 flex items-center justify-between text-left transition"
+                          style={
+                            isSelected
+                              ? { borderColor: brandColor, background: brandColor + "08" }
+                              : { borderColor: "#e5e7eb", background: "#fff" }
+                          }
+                        >
+                          <div className="flex items-center gap-3">
+                            <div className={`h-9 w-9 rounded-xl ${meta.bg} flex items-center justify-center shrink-0`}>
+                              <i className={`${meta.icon} ${meta.color} text-sm`} />
+                            </div>
+                            <div>
+                              <div className="font-extrabold text-gray-900 text-sm">
+                                {meta.label}
+                              </div>
+                              {!shippingConfig.hidePrices && (
+                                <div className="text-xs text-gray-500 mt-0.5">
+                                  {cost === 0 ? "Gratis" : `+${formatCOP(cost)}`}
+                                </div>
+                              )}
+                            </div>
+                          </div>
+                          {/* Radio visual */}
+                          <div
+                            className="h-5 w-5 rounded-full border-2 flex items-center justify-center shrink-0 transition-colors"
+                            style={
+                              isSelected
+                                ? { borderColor: brandColor, background: brandColor }
+                                : { borderColor: "#d1d5db", background: "#fff" }
+                            }
+                          >
+                            {isSelected && (
+                              <div className="h-2 w-2 rounded-full bg-white" />
+                            )}
+                          </div>
+                        </button>
+                      );
+                    })}
+                  </div>
+
+                  {/* Nota de envío */}
+                  {shippingConfig.note ? (
+                    <div className="flex items-start gap-2 bg-amber-50 border border-amber-200 rounded-xl px-3 py-2.5">
+                      <i className="fa-solid fa-circle-info text-amber-500 text-sm mt-0.5 shrink-0" />
+                      <p className="text-xs text-amber-800">{shippingConfig.note}</p>
+                    </div>
+                  ) : null}
+                </div>
+              )}
+
+              {/* Resumen de totales */}
+              {cart.length > 0 && (
+                <div className="border-t pt-4 space-y-2">
+                  <div className="flex items-center justify-between text-sm text-gray-500">
+                    <span>Subtotal</span>
+                    <span className="font-bold">{formatCOP(subtotal)}</span>
+                  </div>
+                  {shippingConfig.enabled && selectedShipping && !shippingConfig.hidePrices ? (
+                    <div className="flex items-center justify-between text-sm text-gray-500">
+                      <span>Envío ({SHIPPING_LABELS[selectedShipping].label})</span>
+                      <span className="font-bold">
+                        {shippingCost === 0 ? (
+                          <span className="text-green-600">Gratis</span>
+                        ) : (
+                          formatCOP(shippingCost)
+                        )}
+                      </span>
+                    </div>
+                  ) : null}
+                  <div className="flex items-center justify-between font-black text-gray-900 text-base border-t pt-2 mt-1">
+                    <span>Total</span>
+                    <span>{formatCOP(total)}</span>
+                  </div>
+                </div>
+              )}
+
+              {/* Datos del cliente */}
+              <div className="space-y-3">
+                <div className="text-sm font-extrabold text-gray-900">Tus datos</div>
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                   <div>
                     <label className="text-xs font-semibold text-gray-600">Nombre</label>
-                    <input className="w-full mt-1 p-3 border rounded-2xl focus:outline-none focus:ring-2 focus:ring-indigo-200" placeholder="Tu nombre" value={customerName} onChange={(e) => setCustomerName(e.target.value)} />
+                    <input
+                      className="w-full mt-1 p-3 border rounded-2xl focus:outline-none focus:ring-2 focus:ring-indigo-200"
+                      placeholder="Tu nombre"
+                      value={customerName}
+                      onChange={(e) => setCustomerName(e.target.value)}
+                    />
                   </div>
                   <div>
                     <label className="text-xs font-semibold text-gray-600">Teléfono</label>
-                    <input className="w-full mt-1 p-3 border rounded-2xl focus:outline-none focus:ring-2 focus:ring-indigo-200" placeholder="Solo números" value={customerPhone} onChange={(e) => setCustomerPhone(e.target.value)} inputMode="numeric" />
+                    <input
+                      className="w-full mt-1 p-3 border rounded-2xl focus:outline-none focus:ring-2 focus:ring-indigo-200"
+                      placeholder="Solo números"
+                      value={customerPhone}
+                      onChange={(e) => setCustomerPhone(e.target.value)}
+                      inputMode="numeric"
+                    />
                   </div>
                 </div>
                 <div>
                   <label className="text-xs font-semibold text-gray-600">Dirección</label>
-                  <input className="w-full mt-1 p-3 border rounded-2xl focus:outline-none focus:ring-2 focus:ring-indigo-200" placeholder="Tu dirección" value={customerAddress} onChange={(e) => setCustomerAddress(e.target.value)} />
+                  <input
+                    className="w-full mt-1 p-3 border rounded-2xl focus:outline-none focus:ring-2 focus:ring-indigo-200"
+                    placeholder="Tu dirección"
+                    value={customerAddress}
+                    onChange={(e) => setCustomerAddress(e.target.value)}
+                  />
                 </div>
                 <div>
-                  <label className="text-xs font-semibold text-gray-600">Notas (opcional)</label>
-                  <textarea className="w-full mt-1 p-3 border rounded-2xl focus:outline-none focus:ring-2 focus:ring-indigo-200" placeholder="Indicaciones para el pedido" value={customerNotes} onChange={(e) => setCustomerNotes(e.target.value)} rows={3} />
+                  <label className="text-xs font-semibold text-gray-600">
+                    Notas (opcional)
+                  </label>
+                  <textarea
+                    className="w-full mt-1 p-3 border rounded-2xl focus:outline-none focus:ring-2 focus:ring-indigo-200"
+                    placeholder="Indicaciones para el pedido"
+                    value={customerNotes}
+                    onChange={(e) => setCustomerNotes(e.target.value)}
+                    rows={3}
+                  />
                 </div>
               </div>
             </div>

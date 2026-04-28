@@ -44,6 +44,14 @@ const SettingsView: React.FC = () => {
     const [phone, setPhone] = useState("");
     const [location, setLocation] = useState("");
 
+    // form — envíos
+    const [shippingEnabled, setShippingEnabled] = useState(false);
+    const [shippingMethods, setShippingMethods] = useState<string[]>(["cod"]); // cod = contra entrega, carrier = transportadora
+    const [shippingCostCOD, setShippingCostCOD] = useState("0");
+    const [shippingCostCarrier, setShippingCostCarrier] = useState("0");
+    const [shippingNote, setShippingNote] = useState("");
+    const [shippingHidePrices, setShippingHidePrices] = useState(false);
+
     // cargar tienda
     useEffect(() => {
         if (!user) return;
@@ -92,6 +100,14 @@ const SettingsView: React.FC = () => {
             setEmail(data.email ?? "");
             setPhone(data.phone ?? "");
             setLocation(data.location ?? "");
+
+            // cargar configuración de envíos
+            setShippingEnabled(data.shippingEnabled ?? false);
+            setShippingMethods(data.shippingMethods ?? ["cod"]);
+            setShippingCostCOD(String(data.shippingCostCOD ?? 0));
+            setShippingCostCarrier(String(data.shippingCostCarrier ?? 0));
+            setShippingNote(data.shippingNote ?? "");
+            setShippingHidePrices(data.shippingHidePrices ?? false);
 
             setLoading(false);
         };
@@ -160,6 +176,18 @@ const SettingsView: React.FC = () => {
         return `${window.location.origin}/#/${store.slug}`;
     }, [store?.slug]);
 
+    // --- Toggle método de envío ---
+    const toggleShippingMethod = (method: string) => {
+        setShippingMethods((prev) => {
+            if (prev.includes(method)) {
+                // No permitir dejar vacío
+                if (prev.length === 1) return prev;
+                return prev.filter((m) => m !== method);
+            }
+            return [...prev, method];
+        });
+    };
+
     // --- Guardar ---
 
     const handleSave = async () => {
@@ -206,6 +234,13 @@ const SettingsView: React.FC = () => {
                 email: email.trim(),
                 phone: phone.trim(),
                 location: location.trim(),
+                // envíos
+                shippingEnabled,
+                shippingMethods,
+                shippingCostCOD: Number(shippingCostCOD) || 0,
+                shippingCostCarrier: Number(shippingCostCarrier) || 0,
+                shippingNote: shippingNote.trim(),
+                shippingHidePrices,
                 ...logoPayload,
                 ...bannerPayload,
                 updatedAt: new Date(),
@@ -295,7 +330,7 @@ const SettingsView: React.FC = () => {
                 </div>
             </div>
 
-            {/* ── Banner principal (NUEVO) ── */}
+            {/* ── Banner principal ── */}
             <div className="bg-white border rounded-xl p-6 space-y-4">
                 <h2 className="font-bold text-gray-900">Banner principal</h2>
 
@@ -350,7 +385,7 @@ const SettingsView: React.FC = () => {
                 )}
             </div>
 
-            {/* ── Color de marca (NUEVO) ── */}
+            {/* ── Color de marca ── */}
             <div className="bg-white border rounded-xl p-6 space-y-4">
                 <h2 className="font-bold text-gray-900">Color de marca</h2>
 
@@ -372,7 +407,7 @@ const SettingsView: React.FC = () => {
                 </p>
             </div>
 
-            {/* ── Información general (original) ── */}
+            {/* ── Información general ── */}
             <div className="bg-white border rounded-xl p-6 space-y-4">
                 <h2 className="font-bold text-gray-900">Información general</h2>
 
@@ -408,7 +443,7 @@ const SettingsView: React.FC = () => {
                 </div>
             </div>
 
-            {/* ── Catálogo público (original) ── */}
+            {/* ── Catálogo público ── */}
             <div className="bg-white border rounded-xl p-6 space-y-4">
                 <h2 className="font-bold text-gray-900">Catálogo público</h2>
 
@@ -441,7 +476,216 @@ const SettingsView: React.FC = () => {
                 </label>
             </div>
 
-            {/* ── Redes sociales y contacto (NUEVO) ── */}
+            {/* ── Opciones de envío (NUEVO) ── */}
+            <div className="bg-white border rounded-xl p-6 space-y-5">
+                <div className="flex items-center justify-between">
+                    <div>
+                        <h2 className="font-bold text-gray-900">Opciones de envío</h2>
+                        <p className="text-xs text-gray-500 mt-0.5">
+                            El cliente verá estas opciones al finalizar su pedido.
+                        </p>
+                    </div>
+                    {/* Toggle principal */}
+                    <button
+                        type="button"
+                        onClick={() => setShippingEnabled((v) => !v)}
+                        className={`relative inline-flex h-7 w-12 items-center rounded-full transition-colors focus:outline-none ${
+                            shippingEnabled ? "bg-indigo-600" : "bg-gray-200"
+                        }`}
+                        aria-label="Activar envíos"
+                    >
+                        <span
+                            className={`inline-block h-5 w-5 transform rounded-full bg-white shadow transition-transform ${
+                                shippingEnabled ? "translate-x-6" : "translate-x-1"
+                            }`}
+                        />
+                    </button>
+                </div>
+
+                {shippingEnabled && (
+                    <div className="space-y-5 pt-1">
+
+                        {/* Métodos disponibles */}
+                        <div>
+                            <p className="text-sm font-semibold text-gray-700 mb-3">
+                                Métodos disponibles para tus clientes
+                            </p>
+                            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+
+                                {/* Contra entrega */}
+                                <div
+                                    onClick={() => toggleShippingMethod("cod")}
+                                    className={`rounded-xl border-2 p-4 cursor-pointer transition select-none ${
+                                        shippingMethods.includes("cod")
+                                            ? "border-indigo-500 bg-indigo-50"
+                                            : "border-gray-200 hover:border-gray-300"
+                                    }`}
+                                >
+                                    <div className="flex items-center justify-between mb-2">
+                                        <div className="flex items-center gap-2">
+                                            <div className="h-9 w-9 rounded-lg bg-green-100 flex items-center justify-center">
+                                                <i className="fa-solid fa-money-bill-wave text-green-600" />
+                                            </div>
+                                            <span className="font-bold text-gray-900 text-sm">Contra entrega</span>
+                                        </div>
+                                        <div className={`h-5 w-5 rounded-full border-2 flex items-center justify-center ${
+                                            shippingMethods.includes("cod")
+                                                ? "border-indigo-500 bg-indigo-500"
+                                                : "border-gray-300"
+                                        }`}>
+                                            {shippingMethods.includes("cod") && (
+                                                <i className="fa-solid fa-check text-white text-[10px]" />
+                                            )}
+                                        </div>
+                                    </div>
+                                    <p className="text-xs text-gray-500">
+                                        El cliente paga al recibir el pedido.
+                                    </p>
+                                </div>
+
+                                {/* Transportadora */}
+                                <div
+                                    onClick={() => toggleShippingMethod("carrier")}
+                                    className={`rounded-xl border-2 p-4 cursor-pointer transition select-none ${
+                                        shippingMethods.includes("carrier")
+                                            ? "border-indigo-500 bg-indigo-50"
+                                            : "border-gray-200 hover:border-gray-300"
+                                    }`}
+                                >
+                                    <div className="flex items-center justify-between mb-2">
+                                        <div className="flex items-center gap-2">
+                                            <div className="h-9 w-9 rounded-lg bg-blue-100 flex items-center justify-center">
+                                                <i className="fa-solid fa-truck text-blue-600" />
+                                            </div>
+                                            <span className="font-bold text-gray-900 text-sm">Envío con transportadora</span>
+                                        </div>
+                                        <div className={`h-5 w-5 rounded-full border-2 flex items-center justify-center ${
+                                            shippingMethods.includes("carrier")
+                                                ? "border-indigo-500 bg-indigo-500"
+                                                : "border-gray-300"
+                                        }`}>
+                                            {shippingMethods.includes("carrier") && (
+                                                <i className="fa-solid fa-check text-white text-[10px]" />
+                                            )}
+                                        </div>
+                                    </div>
+                                    <p className="text-xs text-gray-500">
+                                        El pedido se envía por empresa de transporte.
+                                    </p>
+                                </div>
+                            </div>
+                        </div>
+
+                        {/* Costos por método */}
+                        <div className="space-y-3">
+                            {/* Checkbox ocultar precios */}
+                            <label className="flex items-center gap-3 cursor-pointer select-none group">
+                                <div className="relative">
+                                    <input
+                                        type="checkbox"
+                                        className="sr-only"
+                                        checked={shippingHidePrices}
+                                        onChange={(e) => setShippingHidePrices(e.target.checked)}
+                                    />
+                                    <div className={`h-5 w-5 rounded border-2 flex items-center justify-center transition-colors ${
+                                        shippingHidePrices
+                                            ? "bg-indigo-600 border-indigo-600"
+                                            : "bg-white border-gray-300 group-hover:border-indigo-400"
+                                    }`}>
+                                        {shippingHidePrices && (
+                                            <i className="fa-solid fa-check text-white text-[10px]" />
+                                        )}
+                                    </div>
+                                </div>
+                                <div>
+                                    <span className="text-sm font-semibold text-gray-700">
+                                        No mostrar precios de envío al cliente
+                                    </span>
+                                    <p className="text-xs text-gray-400 mt-0.5">
+                                        El cliente solo verá las opciones de envío, sin costo asociado.
+                                    </p>
+                                </div>
+                            </label>
+
+                            {/* Campos de costo — solo si no están ocultos */}
+                            {!shippingHidePrices && (
+                                <div className="space-y-3 pt-1">
+                                    <p className="text-sm font-semibold text-gray-700">Costo de envío por método</p>
+                                    <p className="text-xs text-gray-400 -mt-1">
+                                        Escribe 0 si el envío es gratis para ese método.
+                                    </p>
+
+                                    {shippingMethods.includes("cod") && (
+                                        <div className="flex items-center gap-3">
+                                            <div className="h-8 w-8 rounded-lg bg-green-100 flex items-center justify-center shrink-0">
+                                                <i className="fa-solid fa-money-bill-wave text-green-600 text-xs" />
+                                            </div>
+                                            <label className="text-sm text-gray-700 w-36 shrink-0">Contra entrega</label>
+                                            <div className="flex items-center border rounded-lg overflow-hidden flex-1">
+                                                <span className="px-3 py-2 bg-gray-50 text-gray-500 text-sm border-r">$</span>
+                                                <input
+                                                    type="number"
+                                                    min="0"
+                                                    className="flex-1 p-2 text-sm focus:outline-none"
+                                                    value={shippingCostCOD}
+                                                    onChange={(e) => setShippingCostCOD(e.target.value)}
+                                                    placeholder="0"
+                                                />
+                                            </div>
+                                        </div>
+                                    )}
+
+                                    {shippingMethods.includes("carrier") && (
+                                        <div className="flex items-center gap-3">
+                                            <div className="h-8 w-8 rounded-lg bg-blue-100 flex items-center justify-center shrink-0">
+                                                <i className="fa-solid fa-truck text-blue-600 text-xs" />
+                                            </div>
+                                            <label className="text-sm text-gray-700 w-36 shrink-0">Transportadora</label>
+                                            <div className="flex items-center border rounded-lg overflow-hidden flex-1">
+                                                <span className="px-3 py-2 bg-gray-50 text-gray-500 text-sm border-r">$</span>
+                                                <input
+                                                    type="number"
+                                                    min="0"
+                                                    className="flex-1 p-2 text-sm focus:outline-none"
+                                                    value={shippingCostCarrier}
+                                                    onChange={(e) => setShippingCostCarrier(e.target.value)}
+                                                    placeholder="0"
+                                                />
+                                            </div>
+                                        </div>
+                                    )}
+                                </div>
+                            )}
+                        </div>
+
+                        {/* Nota de envío */}
+                        <div>
+                            <label className="text-sm font-semibold text-gray-700 flex items-center gap-2">
+                                <i className="fa-regular fa-note-sticky text-gray-400" />
+                                Nota de envío (opcional)
+                            </label>
+                            <input
+                                className="w-full mt-2 p-3 border rounded-lg text-sm"
+                                placeholder="Ej: Envíos los martes y viernes. Tiempos estimados: 2-3 días hábiles."
+                                value={shippingNote}
+                                onChange={(e) => setShippingNote(e.target.value)}
+                            />
+                            <p className="text-xs text-gray-400 mt-1">
+                                Se mostrará al cliente en el formulario del pedido.
+                            </p>
+                        </div>
+                    </div>
+                )}
+
+                {!shippingEnabled && (
+                    <div className="rounded-xl bg-gray-50 border border-dashed border-gray-200 p-4 text-center text-sm text-gray-400">
+                        <i className="fa-solid fa-truck-fast text-2xl mb-2 block text-gray-300" />
+                        Activa esta opción para que tus clientes puedan elegir cómo recibir su pedido.
+                    </div>
+                )}
+            </div>
+
+            {/* ── Redes sociales y contacto ── */}
             <div className="bg-white border rounded-xl p-6 space-y-4">
                 <h2 className="font-bold text-gray-900">Redes sociales y contacto</h2>
 
@@ -541,7 +785,7 @@ const SettingsView: React.FC = () => {
                 </div>
             </div>
 
-            {/* ── Guardar (original) ── */}
+            {/* ── Guardar ── */}
             {error && <div className="text-sm text-red-600">{error}</div>}
 
             <div className="flex justify-end">
