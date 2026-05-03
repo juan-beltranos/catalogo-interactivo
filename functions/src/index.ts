@@ -9,6 +9,26 @@ setGlobalOptions({
     region: "us-central1",
 });
 
+function getFutureDateFromFirestore(value: any, now: Date): Date | null {
+    if (!value) return null;
+
+    if (typeof value.toDate === "function") {
+        const date = value.toDate();
+        return date > now ? date : null;
+    }
+
+    if (typeof value === "number") {
+        const date = new Date(value);
+        return date > now ? date : null;
+    }
+
+    if (value instanceof Date) {
+        return value > now ? value : null;
+    }
+
+    return null;
+}
+
 export const activateSubscription = onRequest(async (req, res): Promise<void> => {
     try {
         if (req.method !== "POST") {
@@ -32,6 +52,7 @@ export const activateSubscription = onRequest(async (req, res): Promise<void> =>
         const normalizedEmail = email.trim().toLowerCase();
 
         let userRecord: admin.auth.UserRecord;
+
         try {
             userRecord = await admin.auth().getUserByEmail(normalizedEmail);
         } catch (error) {
@@ -63,13 +84,34 @@ export const activateSubscription = onRequest(async (req, res): Promise<void> =>
         const storeData = storeDoc.data();
 
         const now = new Date();
+
+        /**
+         * Base de inicio para calcular el próximo vencimiento.
+         *
+         * Casos:
+         * 1. Si ya tiene una suscripción paga vigente, se suma 1 mes desde subscriptionEndAt.
+         * 2. Si está en prueba gratis activa y paga antes de vencer, se suma 1 mes desde trialEndsAt.
+         * 3. Si no tiene nada activo o ya venció, se suma 1 mes desde hoy.
+         */
         let baseDate = now;
 
-        if (storeData.subscriptionEndAt?.toDate) {
-            const currentEndDate = storeData.subscriptionEndAt.toDate();
-            if (currentEndDate > now) {
-                baseDate = currentEndDate;
-            }
+        const currentSubscriptionEndDate = getFutureDateFromFirestore(
+            storeData.subscriptionEndAt,
+            now
+        );
+
+        const currentTrialEndDate =
+            getFutureDateFromFirestore(storeData.trialEndsAt, now) ||
+            getFutureDateFromFirestore(storeData.trialEndsAtMs, now);
+
+        if (currentSubscriptionEndDate) {
+            baseDate = currentSubscriptionEndDate;
+        } else if (
+            storeData.hasFreeTrial === true &&
+            storeData.freeTrialStatus === "active" &&
+            currentTrialEndDate
+        ) {
+            baseDate = currentTrialEndDate;
         }
 
         const newEndDate = new Date(baseDate);
@@ -78,10 +120,20 @@ export const activateSubscription = onRequest(async (req, res): Promise<void> =>
         await storeRef.set(
             {
                 hasActiveSubscription: true,
+
                 subscriptionType: "subscription",
+                subscriptionStatus: "active",
                 subscriptionStartAt: Timestamp.fromDate(now),
                 subscriptionEndAt: Timestamp.fromDate(newEndDate),
                 subscriptionLastPaymentAt: FieldValue.serverTimestamp(),
+
+                /**
+                 * Si venía de prueba gratis, la marcamos como convertida.
+                 * No borramos las fechas de trial para mantener historial.
+                 */
+                freeTrialStatus:
+                    storeData.hasFreeTrial === true ? "converted" : storeData.freeTrialStatus ?? null,
+
                 ownerEmail: normalizedEmail,
                 updatedAt: FieldValue.serverTimestamp(),
             },
@@ -96,8 +148,19 @@ export const activateSubscription = onRequest(async (req, res): Promise<void> =>
             storeId: storeDoc.id,
             status: "approved",
             type: "monthly_subscription",
+
+            /**
+             * Para auditoría:
+             * Si pagó durante prueba gratis, queda marcado aquí.
+             */
+            hadFreeTrial: storeData.hasFreeTrial === true,
+            previousFreeTrialStatus: storeData.freeTrialStatus ?? null,
+            previousTrialEndsAt: storeData.trialEndsAt ?? null,
+            previousTrialEndsAtMs: storeData.trialEndsAtMs ?? null,
+
             createdAt: FieldValue.serverTimestamp(),
             subscriptionStartAt: Timestamp.fromDate(now),
+            subscriptionBaseDate: Timestamp.fromDate(baseDate),
             subscriptionEndAt: Timestamp.fromDate(newEndDate),
         });
 
@@ -105,11 +168,14 @@ export const activateSubscription = onRequest(async (req, res): Promise<void> =>
             ok: true,
             message: "Suscripción activada correctamente",
             storeId: storeDoc.id,
+            subscriptionStartAt: now,
+            subscriptionBaseDate: baseDate,
             subscriptionEndAt: newEndDate,
             paymentId: paymentRef.id,
         });
     } catch (error) {
         console.error("Error activando suscripción:", error);
+
         res.status(500).json({
             ok: false,
             message: "Error interno del servidor",

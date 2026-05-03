@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { signInWithEmailAndPassword, sendPasswordResetEmail } from 'firebase/auth'; // NEW
+import { signInWithEmailAndPassword, sendPasswordResetEmail } from 'firebase/auth';
 import { auth } from '../../lib/firebase';
 import { useNavigate, Navigate } from 'react-router-dom';
 import { useAuth } from '../../context/AuthContext';
@@ -7,8 +7,9 @@ import { useAuth } from '../../context/AuthContext';
 const LoginView: React.FC = () => {
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
+  const [showPassword, setShowPassword] = useState(false);
   const [error, setError] = useState('');
-  const [success, setSuccess] = useState(''); // NEW
+  const [success, setSuccess] = useState('');
   const [loading, setLoading] = useState(false);
 
   const navigate = useNavigate();
@@ -20,7 +21,7 @@ const LoginView: React.FC = () => {
   const handleLogin = async (e: React.FormEvent) => {
     e.preventDefault();
     setError('');
-    setSuccess(''); // NEW
+    setSuccess('');
     setLoading(true);
 
     try {
@@ -34,7 +35,6 @@ const LoginView: React.FC = () => {
     }
   };
 
-  // NEW: reset password
   const handleForgotPassword = async () => {
     setError('');
     setSuccess('');
@@ -45,15 +45,12 @@ const LoginView: React.FC = () => {
     }
 
     try {
-      // Opcional: actionCodeSettings para controlar a dónde vuelve el usuario
-      // Si no lo pones, Firebase usa el flujo por defecto.
-      await sendPasswordResetEmail(auth, email /*, actionCodeSettings */);
+      await sendPasswordResetEmail(auth, email);
 
       setSuccess('Listo. Te enviamos un correo para restablecer tu contraseña (revisa spam).');
     } catch (err: any) {
       console.error(err);
 
-      // Mensajes típicos
       if (err.code === 'auth/user-not-found') {
         setError('No existe una cuenta con ese correo.');
       } else if (err.code === 'auth/invalid-email') {
@@ -100,6 +97,7 @@ const LoginView: React.FC = () => {
               onChange={(e) => setEmail(e.target.value)}
               className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-transparent outline-none transition-all"
               placeholder="admin@ejemplo.com"
+              autoComplete="email"
             />
           </div>
 
@@ -107,17 +105,30 @@ const LoginView: React.FC = () => {
             <label className="block text-sm font-medium text-gray-700 mb-1">
               Contraseña
             </label>
-            <input
-              type="password"
-              required
-              value={password}
-              onChange={(e) => setPassword(e.target.value)}
-              className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-transparent outline-none transition-all"
-              placeholder="••••••••"
-            />
+
+            <div className="relative">
+              <input
+                type={showPassword ? 'text' : 'password'}
+                required
+                value={password}
+                onChange={(e) => setPassword(e.target.value)}
+                className="w-full px-4 py-2 pr-12 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-transparent outline-none transition-all"
+                placeholder="••••••••"
+                autoComplete="current-password"
+              />
+
+              <button
+                type="button"
+                onClick={() => setShowPassword((prev) => !prev)}
+                className="absolute inset-y-0 right-0 px-3 flex items-center text-gray-500 hover:text-gray-700"
+                aria-label={showPassword ? 'Ocultar contraseña' : 'Mostrar contraseña'}
+                title={showPassword ? 'Ocultar contraseña' : 'Mostrar contraseña'}
+              >
+                {showPassword ? 'Ocultar' : 'Ver'}
+              </button>
+            </div>
           </div>
 
-          {/* NEW: forgot password */}
           <div className="text-right">
             <button
               type="button"
@@ -140,7 +151,7 @@ const LoginView: React.FC = () => {
         <div className="mt-6 text-center">
           <button
             type="button"
-            onClick={() => navigate("/admin/register")}
+            onClick={() => navigate('/admin/register')}
             className="w-full border rounded-lg p-2 font-semibold"
           >
             Crear cuenta

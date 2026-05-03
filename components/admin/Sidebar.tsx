@@ -12,6 +12,7 @@ type MenuItem = {
 
 type SidebarCustomProps = SidebarProps & {
   hasActiveSubscription?: boolean;
+  hideSubscription?: boolean;
 };
 
 const SidebarItem: React.FC<SidebarItemProps & { disabled?: boolean }> = ({
@@ -30,6 +31,7 @@ const SidebarItem: React.FC<SidebarItemProps & { disabled?: boolean }> = ({
       >
         <i className={`fa-solid ${icon} w-5 text-center`} />
         <span>{label}</span>
+        <i className="fa-solid fa-lock ml-auto text-xs" />
       </div>
     );
   }
@@ -52,28 +54,60 @@ const SidebarItem: React.FC<SidebarItemProps & { disabled?: boolean }> = ({
 const Sidebar: React.FC<SidebarCustomProps> = ({
   onNavigate,
   hasActiveSubscription = false,
+  hideSubscription = false,
 }) => {
   const location = useLocation();
 
+  const canUseAdmin = hasActiveSubscription === true;
+
   const menuItems: MenuItem[] = [
-    { to: '/admin', icon: 'fa-chart-pie', label: 'Dashboard', exact: true },
-    { to: '/admin/products', icon: 'fa-box', label: 'Productos' },
-    { to: '/admin/categories', icon: 'fa-tags', label: 'Categorías' },
+    {
+      to: '/admin',
+      icon: 'fa-chart-pie',
+      label: 'Dashboard',
+      exact: true,
+      disabled: !canUseAdmin,
+    },
+    {
+      to: '/admin/products',
+      icon: 'fa-box',
+      label: 'Productos',
+      disabled: !canUseAdmin,
+    },
+    {
+      to: '/admin/categories',
+      icon: 'fa-tags',
+      label: 'Categorías',
+      disabled: !canUseAdmin,
+    },
     {
       to: '/admin/orders',
       icon: 'fa-cart-shopping',
       label: 'Pedidos',
-      disabled: !hasActiveSubscription,
+      disabled: !canUseAdmin,
     },
     {
       to: '/admin/customers',
       icon: 'fa-users',
       label: 'Clientes',
-      disabled: !hasActiveSubscription,
+      disabled: !canUseAdmin,
     },
-    // { to: '/admin/subscription', icon: 'fa-credit-card', label: 'Suscripción' },
-    { to: '/admin/settings', icon: 'fa-sliders', label: 'Configuración' },
+    {
+      to: '/admin/settings',
+      icon: 'fa-sliders',
+      label: 'Configuración',
+      disabled: !canUseAdmin,
+    },
   ];
+
+  if (!hideSubscription) {
+    menuItems.splice(5, 0, {
+      to: '/admin/subscription',
+      icon: 'fa-credit-card',
+      label: 'Suscripción',
+      disabled: false,
+    });
+  }
 
   const isLinkActive = (item: MenuItem) => {
     if (item.exact) return location.pathname === item.to;
@@ -82,6 +116,18 @@ const Sidebar: React.FC<SidebarCustomProps> = ({
 
   return (
     <aside className="w-64 bg-white border-r border-gray-200 flex flex-col h-full overflow-y-auto">
+      {!canUseAdmin && !hideSubscription && (
+        <div className="m-4 rounded-xl border border-amber-200 bg-amber-50 p-3 text-sm text-amber-800">
+          <div className="flex items-start gap-2">
+            <i className="fa-solid fa-triangle-exclamation mt-0.5" />
+            <div>
+              <p className="font-bold">Acceso limitado</p>
+              <p className="mt-1">Activa tu suscripción para usar el panel.</p>
+            </div>
+          </div>
+        </div>
+      )}
+
       <div className="p-4 space-y-1">
         <div className="px-4 mb-4">
           <p className="text-xs font-semibold text-gray-400 uppercase tracking-widest">
