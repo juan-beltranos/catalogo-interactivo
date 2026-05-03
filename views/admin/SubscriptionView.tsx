@@ -1,5 +1,14 @@
 import React, { useEffect, useMemo, useState } from 'react';
-import { collection, getDocs, limit, query, where } from 'firebase/firestore';
+import {
+    collection,
+    doc,
+    getDocs,
+    limit,
+    query,
+    serverTimestamp,
+    updateDoc,
+    where,
+} from 'firebase/firestore';
 import { db } from '../../lib/firebase';
 import { useAuth } from '../../context/AuthContext';
 
@@ -14,7 +23,17 @@ type StoreInfo = {
     name: string;
     slug: string;
     hasActiveSubscription: boolean;
+    subscriptionStatus?: string | null;
     subscriptionEndAt?: string | number | Date | FirestoreTimestampLike | null;
+
+    source?: string | null;
+
+    hasFreeTrial?: boolean;
+    freeTrialDays?: number;
+    freeTrialStatus?: string | null;
+    trialStartedAt?: string | number | Date | FirestoreTimestampLike | null;
+    trialEndsAt?: string | number | Date | FirestoreTimestampLike | null;
+    trialEndsAtMs?: number | null;
 };
 
 const WOMPI_PAYMENT_URL = 'https://checkout.wompi.co/l/TU_LINK_DE_PAGO';
@@ -72,6 +91,19 @@ const getDaysRemaining = (
     return Math.ceil(diffMs / (1000 * 60 * 60 * 24));
 };
 
+const isTrialExpired = (store?: StoreInfo | null) => {
+    if (!store?.hasFreeTrial) return false;
+
+    if (typeof store.trialEndsAtMs === 'number') {
+        return Date.now() > store.trialEndsAtMs;
+    }
+
+    const parsedTrialEnd = parseDate(store.trialEndsAt);
+    if (!parsedTrialEnd) return false;
+
+    return Date.now() > parsedTrialEnd.getTime();
+};
+
 const SubscriptionView: React.FC = () => {
     const { user } = useAuth();
 
@@ -108,16 +140,59 @@ const SubscriptionView: React.FC = () => {
                     return;
                 }
 
-                const doc = snap.docs[0];
-                const data = doc.data() as any;
+                const storeDoc = snap.docs[0];
+                const data = storeDoc.data() as any;
 
-                setStoreInfo({
-                    id: doc.id,
+                const loadedStore: StoreInfo = {
+                    id: storeDoc.id,
                     name: typeof data.name === 'string' ? data.name : '',
                     slug: typeof data.slug === 'string' ? data.slug : '',
                     hasActiveSubscription: data.hasActiveSubscription === true,
+                    subscriptionStatus:
+                        typeof data.subscriptionStatus === 'string'
+                            ? data.subscriptionStatus
+                            : null,
                     subscriptionEndAt: data.subscriptionEndAt ?? null,
-                });
+
+                    source: typeof data.source === 'string' ? data.source : null,
+
+                    hasFreeTrial: data.hasFreeTrial === true,
+                    freeTrialDays:
+                        typeof data.freeTrialDays === 'number'
+                            ? data.freeTrialDays
+                            : 0,
+                    freeTrialStatus:
+                        typeof data.freeTrialStatus === 'string'
+                            ? data.freeTrialStatus
+                            : null,
+                    trialStartedAt: data.trialStartedAt ?? null,
+                    trialEndsAt: data.trialEndsAt ?? null,
+                    trialEndsAtMs:
+                        typeof data.trialEndsAtMs === 'number'
+                            ? data.trialEndsAtMs
+                            : null,
+                };
+
+                const trialExpired = isTrialExpired(loadedStore);
+
+                if (
+                    trialExpired &&
+                    loadedStore.freeTrialStatus !== 'expired' &&
+                    loadedStore.subscriptionStatus !== 'trial_expired'
+                ) {
+                    await updateDoc(doc(db, 'stores', storeDoc.id), {
+                        hasActiveSubscription: false,
+                        subscriptionStatus: 'trial_expired',
+                        freeTrialStatus: 'expired',
+                        updatedAt: serverTimestamp(),
+                    });
+
+                    loadedStore.hasActiveSubscription = false;
+                    loadedStore.subscriptionStatus = 'trial_expired';
+                    loadedStore.freeTrialStatus = 'expired';
+                }
+
+                setStoreInfo(loadedStore);
             } catch (error) {
                 console.error('Error cargando la suscripción:', error);
                 if (isMounted) setStoreInfo(null);
@@ -135,10 +210,31 @@ const SubscriptionView: React.FC = () => {
 
     const registeredEmail = user?.email || '';
 
-    const daysRemaining = useMemo(
+    const isFreeTrialActive = useMemo(() => {
+        if (!storeInfo?.hasFreeTrial) return false;
+        if (storeInfo.freeTrialStatus !== 'active') return false;
+        return !isTrialExpired(storeInfo);
+    }, [storeInfo]);
+
+    const trialDaysRemaining = useMemo(
+        () => getDaysRemaining(storeInfo?.trialEndsAt),
+        [storeInfo?.trialEndsAt]
+    );
+
+    const subscriptionDaysRemaining = useMemo(
         () => getDaysRemaining(storeInfo?.subscriptionEndAt),
         [storeInfo?.subscriptionEndAt]
     );
+
+    const currentExpirationDate = useMemo(() => {
+        if (isFreeTrialActive) return storeInfo?.trialEndsAt;
+        return storeInfo?.subscriptionEndAt;
+    }, [isFreeTrialActive, storeInfo?.trialEndsAt, storeInfo?.subscriptionEndAt]);
+
+    const currentDaysRemaining = useMemo(() => {
+        if (isFreeTrialActive) return trialDaysRemaining;
+        return subscriptionDaysRemaining;
+    }, [isFreeTrialActive, trialDaysRemaining, subscriptionDaysRemaining]);
 
     const statusConfig = useMemo(() => {
         if (!storeInfo) {
@@ -152,7 +248,47 @@ const SubscriptionView: React.FC = () => {
             };
         }
 
-        // 🔴 PRIORIDAD TOTAL: si no tiene suscripción activa
+        if (isFreeTrialActive) {
+            if (trialDaysRemaining !== null && trialDaysRemaining <= 2) {
+                return {
+                    badge: 'Prueba por vencer',
+                    badgeClass: 'bg-amber-100 text-amber-700 border-amber-200',
+                    alertClass: 'bg-amber-50 border-amber-200 text-amber-700',
+                    title: 'Tu prueba gratis está por vencer',
+                    message: `Tu prueba gratis vence en ${trialDaysRemaining} día${trialDaysRemaining === 1 ? '' : 's'}. Puedes pagar ahora para evitar interrupciones.`,
+                    icon: 'fa-clock',
+                };
+            }
+
+            return {
+                badge: 'Prueba gratis',
+                badgeClass: 'bg-indigo-100 text-indigo-700 border-indigo-200',
+                alertClass: 'bg-indigo-50 border-indigo-200 text-indigo-700',
+                title: 'Prueba gratis activa',
+                message:
+                    trialDaysRemaining === null
+                        ? 'Tu prueba gratis de 7 días está activa.'
+                        : `Tu prueba gratis está activa. Te quedan ${trialDaysRemaining} día${trialDaysRemaining === 1 ? '' : 's'}.`,
+                icon: 'fa-gift',
+            };
+        }
+
+        if (
+            storeInfo.hasFreeTrial &&
+            (storeInfo.freeTrialStatus === 'expired' ||
+                storeInfo.subscriptionStatus === 'trial_expired')
+        ) {
+            return {
+                badge: 'Prueba vencida',
+                badgeClass: 'bg-red-100 text-red-700 border-red-200',
+                alertClass: 'bg-red-50 border-red-200 text-red-700',
+                title: 'Tu prueba gratis terminó',
+                message:
+                    'Ya pasaron los 7 días gratis. Realiza el pago para activar tu suscripción y seguir usando el catálogo.',
+                icon: 'fa-triangle-exclamation',
+            };
+        }
+
         if (!storeInfo.hasActiveSubscription) {
             return {
                 badge: 'Inactiva',
@@ -164,7 +300,6 @@ const SubscriptionView: React.FC = () => {
             };
         }
 
-        // 👇 SOLO si está activa, usamos fechas
         if (!storeInfo.subscriptionEndAt) {
             return {
                 badge: 'Activa',
@@ -176,7 +311,7 @@ const SubscriptionView: React.FC = () => {
             };
         }
 
-        if (daysRemaining === null) {
+        if (subscriptionDaysRemaining === null) {
             return {
                 badge: 'Activa',
                 badgeClass: 'bg-green-100 text-green-700 border-green-200',
@@ -187,7 +322,7 @@ const SubscriptionView: React.FC = () => {
             };
         }
 
-        if (daysRemaining < 0) {
+        if (subscriptionDaysRemaining < 0) {
             return {
                 badge: 'Vencida',
                 badgeClass: 'bg-red-100 text-red-700 border-red-200',
@@ -198,13 +333,13 @@ const SubscriptionView: React.FC = () => {
             };
         }
 
-        if (daysRemaining <= 5) {
+        if (subscriptionDaysRemaining <= 5) {
             return {
                 badge: 'Por vencer',
                 badgeClass: 'bg-amber-100 text-amber-700 border-amber-200',
                 alertClass: 'bg-amber-50 border-amber-200 text-amber-700',
                 title: 'Próxima a vencer',
-                message: `Tu suscripción vence en ${daysRemaining} día${daysRemaining === 1 ? '' : 's'}.`,
+                message: `Tu suscripción vence en ${subscriptionDaysRemaining} día${subscriptionDaysRemaining === 1 ? '' : 's'}.`,
                 icon: 'fa-clock',
             };
         }
@@ -214,10 +349,10 @@ const SubscriptionView: React.FC = () => {
             badgeClass: 'bg-green-100 text-green-700 border-green-200',
             alertClass: 'bg-green-50 border-green-200 text-green-700',
             title: 'Suscripción activa',
-            message: `Te quedan ${daysRemaining} días de suscripción.`,
+            message: `Te quedan ${subscriptionDaysRemaining} días de suscripción.`,
             icon: 'fa-circle-check',
         };
-    }, [storeInfo, daysRemaining]);
+    }, [storeInfo, isFreeTrialActive, trialDaysRemaining, subscriptionDaysRemaining]);
 
     const handleCopyEmail = async () => {
         if (!registeredEmail) {
@@ -266,7 +401,7 @@ const SubscriptionView: React.FC = () => {
                     <div>
                         <h2 className="text-xl font-bold text-gray-900">Estado de tu suscripción</h2>
                         <p className="text-sm text-gray-500 mt-1">
-                            Aquí puedes ver si tu plan está activo, por vencer o vencido.
+                            Aquí puedes ver si tu plan está activo, en prueba gratis, por vencer o vencido.
                         </p>
                     </div>
 
@@ -296,19 +431,36 @@ const SubscriptionView: React.FC = () => {
                     </div>
 
                     <div className="rounded-xl border p-4">
-                        <p className="text-xs uppercase tracking-wide text-gray-400">Vence el</p>
+                        <p className="text-xs uppercase tracking-wide text-gray-400">
+                            {isFreeTrialActive ? 'Prueba gratis vence el' : 'Suscripción vence el'}
+                        </p>
                         <p className="text-sm font-semibold text-gray-900 mt-2">
-                            {formatDate(storeInfo?.subscriptionEndAt)}
+                            {formatDate(currentExpirationDate)}
                         </p>
                     </div>
 
                     <div className="rounded-xl border p-4">
-                        <p className="text-xs uppercase tracking-wide text-gray-400">Días restantes</p>
+                        <p className="text-xs uppercase tracking-wide text-gray-400">
+                            Días restantes
+                        </p>
                         <p className="text-sm font-semibold text-gray-900 mt-2">
-                            {daysRemaining === null ? 'No disponible' : daysRemaining < 0 ? '0' : daysRemaining}
+                            {currentDaysRemaining === null
+                                ? 'No disponible'
+                                : currentDaysRemaining < 0
+                                    ? '0'
+                                    : currentDaysRemaining}
                         </p>
                     </div>
                 </div>
+
+                {storeInfo?.source ? (
+                    <div className="mt-4 rounded-xl border p-4">
+                        <p className="text-xs uppercase tracking-wide text-gray-400">Origen del registro</p>
+                        <p className="text-sm font-semibold text-gray-900 mt-2">
+                            {storeInfo.source === 'client' ? 'Cliente desde landing' : storeInfo.source}
+                        </p>
+                    </div>
+                ) : null}
             </div>
 
             <div className="bg-white rounded-2xl border p-6">

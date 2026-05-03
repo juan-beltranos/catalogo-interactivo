@@ -1,7 +1,16 @@
 import React, { useEffect, useMemo, useState } from 'react';
-import { Outlet, Link, useNavigate } from 'react-router-dom';
+import { Outlet, Link, useLocation, useNavigate } from 'react-router-dom';
 import { signOut } from 'firebase/auth';
-import { collection, getDocs, limit, query, where } from 'firebase/firestore';
+import {
+  collection,
+  doc,
+  getDocs,
+  limit,
+  query,
+  serverTimestamp,
+  updateDoc,
+  where,
+} from 'firebase/firestore';
 
 import { auth, db } from '../../lib/firebase';
 import { useAuth } from '../../context/AuthContext';
@@ -12,15 +21,39 @@ type StoreInfo = {
   slug: string;
   name: string;
   hasActiveSubscription: boolean;
+
+  subscriptionType?: string | null;
+  source?: string | null;
+  subscriptionStatus?: string | null;
+
+  hasFreeTrial?: boolean;
+  freeTrialStatus?: string | null;
+  trialEndsAtMs?: number | null;
 };
 
 const AdminLayout: React.FC = () => {
   const { user } = useAuth();
   const navigate = useNavigate();
+  const location = useLocation();
 
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const [storeInfo, setStoreInfo] = useState<StoreInfo | null>(null);
   const [loadingStore, setLoadingStore] = useState(true);
+
+  const LEGACY_OWNER_UIDS_WITHOUT_SUBSCRIPTION_MODULE = [
+    //'ywTJNN2V8ucSfCeAb3zSoJC9AzF2', inteliasb
+    'cNATkr3aNUVv1ZXPFg43j6mIJy93',
+    'ubECmtL6btNLlayuST5AyR0nmQj2',
+    '61FsuSIn0catuNBeem5X5HNxQJ33',
+    'bzigS1T3bZbe0XS2gKmpSL3Vxx72',
+    'bw1ha8MzuPZrxjZfXWqbyoCEo532',
+  ];
+
+  const hideSubscriptionModule = useMemo(() => {
+    if (!user?.uid) return false;
+
+    return LEGACY_OWNER_UIDS_WITHOUT_SUBSCRIPTION_MODULE.includes(user.uid);
+  }, [user?.uid]);
 
   useEffect(() => {
     let isMounted = true;
@@ -53,15 +86,63 @@ const AdminLayout: React.FC = () => {
           return;
         }
 
-        const doc = snap.docs[0];
-        const data = doc.data() as any;
+        const storeDoc = snap.docs[0];
+        const data = storeDoc.data() as any;
 
-        setStoreInfo({
-          id: doc.id,
+        const loadedStore: StoreInfo = {
+          id: storeDoc.id,
           slug: typeof data.slug === 'string' ? data.slug : '',
           name: typeof data.name === 'string' ? data.name : '',
           hasActiveSubscription: data.hasActiveSubscription === true,
-        });
+
+          subscriptionType:
+            typeof data.subscriptionType === 'string'
+              ? data.subscriptionType
+              : null,
+
+          source: typeof data.source === 'string' ? data.source : null,
+
+          subscriptionStatus:
+            typeof data.subscriptionStatus === 'string'
+              ? data.subscriptionStatus
+              : null,
+
+          hasFreeTrial: data.hasFreeTrial === true,
+
+          freeTrialStatus:
+            typeof data.freeTrialStatus === 'string'
+              ? data.freeTrialStatus
+              : null,
+
+          trialEndsAtMs:
+            typeof data.trialEndsAtMs === 'number'
+              ? data.trialEndsAtMs
+              : null,
+        };
+
+        const trialExpired =
+          loadedStore.hasFreeTrial === true &&
+          typeof loadedStore.trialEndsAtMs === 'number' &&
+          Date.now() > loadedStore.trialEndsAtMs;
+
+        if (
+          trialExpired &&
+          loadedStore.freeTrialStatus !== 'expired' &&
+          loadedStore.subscriptionStatus !== 'trial_expired'
+        ) {
+          await updateDoc(doc(db, 'stores', storeDoc.id), {
+            hasActiveSubscription: false,
+            subscriptionStatus: 'trial_expired',
+            freeTrialStatus: 'expired',
+            updatedAt: serverTimestamp(),
+          });
+
+          loadedStore.hasActiveSubscription = false;
+          loadedStore.subscriptionStatus = 'trial_expired';
+          loadedStore.freeTrialStatus = 'expired';
+        }
+
+        setStoreInfo(loadedStore);
       } catch (error) {
         console.error('Error cargando la tienda:', error);
 
@@ -81,6 +162,56 @@ const AdminLayout: React.FC = () => {
       isMounted = false;
     };
   }, [user?.uid]);
+
+  const hasAdminAccess = useMemo(() => {
+    if (!storeInfo) return false;
+
+    /**
+     * Compatibilidad para clientes antiguos.
+     *
+     * Tus clientes viejos tienen algo como:
+     * subscriptionType: "one_time"
+     *
+     * Pero no tienen:
+     * source
+     * subscriptionStatus
+     * hasFreeTrial
+     * trialEndsAtMs
+     *
+     * Entonces los dejamos entrar normal para no afectar tiendas antiguas.
+     */
+    const isLegacyOneTimeClient =
+      storeInfo.subscriptionType === 'one_time' &&
+      !storeInfo.source &&
+      !storeInfo.subscriptionStatus &&
+      storeInfo.hasFreeTrial !== true &&
+      !storeInfo.trialEndsAtMs;
+
+    if (isLegacyOneTimeClient) {
+      return true;
+    }
+
+    const trialExpired =
+      storeInfo.hasFreeTrial === true &&
+      typeof storeInfo.trialEndsAtMs === 'number' &&
+      Date.now() > storeInfo.trialEndsAtMs;
+
+    if (trialExpired) {
+      return false;
+    }
+
+    return storeInfo.hasActiveSubscription === true;
+  }, [storeInfo]);
+
+  useEffect(() => {
+    if (loadingStore) return;
+
+    const isSubscriptionPage = location.pathname === '/admin/subscription';
+
+    if (!hasAdminAccess && !isSubscriptionPage) {
+      navigate('/admin/subscription', { replace: true });
+    }
+  }, [loadingStore, hasAdminAccess, location.pathname, navigate]);
 
   const handleLogout = async () => {
     try {
@@ -129,7 +260,10 @@ const AdminLayout: React.FC = () => {
               <i className="fa-solid fa-bars"></i>
             </button>
 
-            <Link to="/admin" className="flex items-center gap-2">
+            <Link
+              to={hasAdminAccess ? '/admin' : '/admin/subscription'}
+              className="flex items-center gap-2"
+            >
               <div className="bg-indigo-600 p-1.5 rounded-lg">
                 <i className="fa-solid fa-layer-group text-white text-lg"></i>
               </div>
@@ -152,7 +286,7 @@ const AdminLayout: React.FC = () => {
             <div className="h-6 w-px bg-gray-200 hidden sm:block"></div>
 
             <div className="flex items-center gap-4">
-              <div className="flex flex-col items-end hidden lg:flex">
+              <div className="flex-col items-end hidden lg:flex">
                 <p className="text-sm font-semibold text-gray-900 leading-none">
                   Administrador
                 </p>
@@ -180,16 +314,22 @@ const AdminLayout: React.FC = () => {
       <div className="flex flex-1">
         <aside className="hidden md:flex sticky top-16 h-[calc(100vh-64px)]">
           <Sidebar
-            hasActiveSubscription={storeInfo?.hasActiveSubscription ?? false}
-            storeName={storeInfo?.name}
-            storeId={storeInfo?.id}
+            onNavigate={() => setMobileMenuOpen(false)}
+            hasActiveSubscription={hasAdminAccess}
+            hideSubscription={hideSubscriptionModule}
           />
         </aside>
 
         <main className="flex-1 overflow-x-hidden">
           <div className="p-6 md:p-8">
             <div className="max-w-6xl mx-auto">
-              <Outlet />
+              {loadingStore ? (
+                <div className="bg-white rounded-2xl border p-8 text-center text-gray-500">
+                  Cargando información de la tienda...
+                </div>
+              ) : (
+                <Outlet />
+              )}
             </div>
           </div>
         </main>
@@ -217,9 +357,8 @@ const AdminLayout: React.FC = () => {
 
             <Sidebar
               onNavigate={() => setMobileMenuOpen(false)}
-              hasActiveSubscription={storeInfo?.hasActiveSubscription}
-              storeName={storeInfo?.name}
-              storeId={storeInfo?.id}
+              hasActiveSubscription={hasAdminAccess}
+              hideSubscription={hideSubscriptionModule}
             />
           </div>
         </div>
