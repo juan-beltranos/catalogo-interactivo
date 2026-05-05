@@ -7,6 +7,11 @@ admin.initializeApp();
 
 setGlobalOptions({
     region: "us-central1",
+    memory: "128MiB",
+    timeoutSeconds: 30,
+    maxInstances: 1,
+    minInstances: 0,
+    concurrency: 10,
 });
 
 function getFutureDateFromFirestore(value: any, now: Date): Date | null {

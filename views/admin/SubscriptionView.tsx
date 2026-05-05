@@ -36,7 +36,7 @@ type StoreInfo = {
     trialEndsAtMs?: number | null;
 };
 
-const WOMPI_PAYMENT_URL = 'https://checkout.wompi.co/l/TU_LINK_DE_PAGO';
+const WOMPI_PAYMENT_URL = 'https://checkout.wompi.co/l/XqPioh';
 
 const parseDate = (
     value?: string | number | Date | FirestoreTimestampLike | null
