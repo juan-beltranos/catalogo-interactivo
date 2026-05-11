@@ -29,6 +29,42 @@ type StoreInfo = {
   hasFreeTrial?: boolean;
   freeTrialStatus?: string | null;
   trialEndsAtMs?: number | null;
+
+  subscriptionEndAt?: unknown;
+  subscriptionEndsAt?: unknown;
+};
+
+const getDateMs = (value: unknown): number | null => {
+  if (!value) return null;
+
+  if (typeof value === 'number') {
+    return value;
+  }
+
+  if (typeof value === 'string') {
+    const parsed = Date.parse(value);
+    return Number.isNaN(parsed) ? null : parsed;
+  }
+
+  if (
+    typeof value === 'object' &&
+    value !== null &&
+    'toDate' in value &&
+    typeof (value as { toDate: () => Date }).toDate === 'function'
+  ) {
+    return (value as { toDate: () => Date }).toDate().getTime();
+  }
+
+  if (
+    typeof value === 'object' &&
+    value !== null &&
+    'seconds' in value &&
+    typeof (value as { seconds: number }).seconds === 'number'
+  ) {
+    return (value as { seconds: number }).seconds * 1000;
+  }
+
+  return null;
 };
 
 const AdminLayout: React.FC = () => {
@@ -118,12 +154,24 @@ const AdminLayout: React.FC = () => {
             typeof data.trialEndsAtMs === 'number'
               ? data.trialEndsAtMs
               : null,
+
+          subscriptionEndAt: data.subscriptionEndAt ?? null,
+          subscriptionEndsAt: data.subscriptionEndsAt ?? null,
         };
 
         const trialExpired =
           loadedStore.hasFreeTrial === true &&
           typeof loadedStore.trialEndsAtMs === 'number' &&
           Date.now() > loadedStore.trialEndsAtMs;
+
+        const subscriptionEndMs =
+          getDateMs(loadedStore.subscriptionEndAt) ??
+          getDateMs(loadedStore.subscriptionEndsAt);
+
+        const subscriptionExpired =
+          loadedStore.hasActiveSubscription === true &&
+          subscriptionEndMs !== null &&
+          Date.now() > subscriptionEndMs;
 
         if (
           trialExpired &&
@@ -140,6 +188,20 @@ const AdminLayout: React.FC = () => {
           loadedStore.hasActiveSubscription = false;
           loadedStore.subscriptionStatus = 'trial_expired';
           loadedStore.freeTrialStatus = 'expired';
+        }
+
+        if (
+          subscriptionExpired &&
+          loadedStore.subscriptionStatus !== 'expired'
+        ) {
+          await updateDoc(doc(db, 'stores', storeDoc.id), {
+            hasActiveSubscription: false,
+            subscriptionStatus: 'expired',
+            updatedAt: serverTimestamp(),
+          });
+
+          loadedStore.hasActiveSubscription = false;
+          loadedStore.subscriptionStatus = 'expired';
         }
 
         setStoreInfo(loadedStore);
@@ -197,6 +259,19 @@ const AdminLayout: React.FC = () => {
       Date.now() > storeInfo.trialEndsAtMs;
 
     if (trialExpired) {
+      return false;
+    }
+
+    const subscriptionEndMs =
+      getDateMs(storeInfo.subscriptionEndAt) ??
+      getDateMs(storeInfo.subscriptionEndsAt);
+
+    const subscriptionExpired =
+      storeInfo.hasActiveSubscription === true &&
+      subscriptionEndMs !== null &&
+      Date.now() > subscriptionEndMs;
+
+    if (subscriptionExpired) {
       return false;
     }
 

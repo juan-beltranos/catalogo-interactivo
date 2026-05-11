@@ -112,11 +112,185 @@ const SHIPPING_LABELS: Record<ShippingMethod, { label: string; icon: string; col
 
 // ─────────────────────────────────────────────────────────────────────────────
 
+
+type CatalogUnavailableReason =
+  | "not_found"
+  | "inactive"
+  | "subscription_inactive"
+  | "subscription_expired"
+  | "trial_expired";
+
+const getDateMs = (value: unknown): number | null => {
+  if (!value) return null;
+
+  if (typeof value === "number") return value;
+
+  if (typeof value === "string") {
+    const parsed = Date.parse(value);
+    return Number.isNaN(parsed) ? null : parsed;
+  }
+
+  if (
+    typeof value === "object" &&
+    value !== null &&
+    "toDate" in value &&
+    typeof (value as { toDate: () => Date }).toDate === "function"
+  ) {
+    return (value as { toDate: () => Date }).toDate().getTime();
+  }
+
+  if (
+    typeof value === "object" &&
+    value !== null &&
+    "seconds" in value &&
+    typeof (value as { seconds: number }).seconds === "number"
+  ) {
+    return (value as { seconds: number }).seconds * 1000;
+  }
+
+  return null;
+};
+
+const getCatalogUnavailableReason = (
+  store: any,
+): CatalogUnavailableReason | null => {
+  if (!store) return "not_found";
+
+  if (store.isActive === false) {
+    return "inactive";
+  }
+
+  /**
+   * Compatibilidad para clientes antiguos de pago único.
+   * Así no se bloquean tiendas viejas que no tienen los campos nuevos
+   * de suscripción/prueba gratis.
+   */
+  const isLegacyOneTimeClient =
+    store.subscriptionType === "one_time" &&
+    !store.source &&
+    !store.subscriptionStatus &&
+    store.hasFreeTrial !== true &&
+    !store.trialEndsAtMs;
+
+  if (isLegacyOneTimeClient) {
+    return null;
+  }
+
+  const trialExpired =
+    store.hasFreeTrial === true &&
+    typeof store.trialEndsAtMs === "number" &&
+    Date.now() > store.trialEndsAtMs;
+
+  if (
+    trialExpired ||
+    store.freeTrialStatus === "expired" ||
+    store.subscriptionStatus === "trial_expired"
+  ) {
+    return "trial_expired";
+  }
+
+  const subscriptionEndMs =
+    getDateMs(store.subscriptionEndAt) ?? getDateMs(store.subscriptionEndsAt);
+
+  const subscriptionExpired =
+    store.hasActiveSubscription === true &&
+    subscriptionEndMs !== null &&
+    Date.now() > subscriptionEndMs;
+
+  if (subscriptionExpired || store.subscriptionStatus === "expired") {
+    return "subscription_expired";
+  }
+
+  if (store.hasActiveSubscription !== true) {
+    return "subscription_inactive";
+  }
+
+  return null;
+};
+
+const CatalogUnavailableScreen: React.FC<{
+  store?: Store | null;
+  reason?: CatalogUnavailableReason | null;
+}> = ({ store, reason }) => {
+  const brandColor = (store as any)?.brandColor || "#111111";
+  const storeName = store?.name || "Catálogo";
+
+  const messageByReason: Record<
+    CatalogUnavailableReason,
+    { title: string; description: string; icon: string }
+  > = {
+    not_found: {
+      title: "Tienda no encontrada",
+      description:
+        "No pudimos encontrar este catálogo.",
+      icon: "fa-regular fa-circle-question",
+    },
+    inactive: {
+      title: "Catálogo no disponible",
+      description:
+        "Esta tienda está desactivada temporalmente. Intenta nuevamente más tarde.",
+      icon: "fa-solid fa-store-slash",
+    },
+    subscription_inactive: {
+      title: "Catálogo no disponible",
+      description:
+        "Este catálogo no está disponible.",
+      icon: "fa-solid fa-lock",
+    },
+    subscription_expired: {
+      title: "Catálogo no disponible",
+      description:
+        "Cuando el administrador la renueve, el catálogo volverá a estar disponible.",
+      icon: "fa-solid fa-calendar-xmark",
+    },
+    trial_expired: {
+      title: "Catálogo no disponible",
+      description:
+        "El periodo de prueba de esta tienda finalizó.",
+      icon: "fa-solid fa-hourglass-end",
+    },
+  };
+
+  const content = messageByReason[reason || "not_found"];
+
+  return (
+    <div className="min-h-screen bg-gray-50 flex items-center justify-center px-4 py-10">
+      <div className="w-full max-w-md bg-white rounded-3xl border border-gray-100 shadow-sm p-8 text-center">
+        <div
+          className="mx-auto h-16 w-16 rounded-2xl flex items-center justify-center text-white shadow-sm"
+          style={{ background: brandColor }}
+        >
+          <i className={`${content.icon} text-2xl`} />
+        </div>
+
+        <p className="mt-5 text-xs font-black uppercase tracking-[0.2em] text-gray-400">
+          {storeName}
+        </p>
+
+        <h1 className="mt-2 text-2xl font-black text-gray-900">
+          {content.title}
+        </h1>
+
+        <p className="mt-3 text-sm leading-6 text-gray-500">
+          {content.description}
+        </p>
+
+        <div className="mt-6 rounded-2xl bg-gray-50 border border-gray-100 p-4 text-xs text-gray-500">
+          <i className="fa-solid fa-circle-info mr-1" />
+          Si eres el administrador de esta tienda, ingresa al panel para revisar tu suscripción.
+        </div>
+      </div>
+    </div>
+  );
+};
+
 const CatalogView: React.FC = () => {
   const { slug } = useParams<{ slug: string }>();
   const [searchParams, setSearchParams] = useSearchParams();
 
   const [store, setStore] = useState<Store | null>(null);
+  const [catalogUnavailableReason, setCatalogUnavailableReason] =
+    useState<CatalogUnavailableReason | null>(null);
   const [products, setProducts] = useState<Product[]>([]);
   const [categories, setCategories] = useState<Category[]>([]);
   const [loading, setLoading] = useState(true);
@@ -234,7 +408,7 @@ const CatalogView: React.FC = () => {
     try {
       const raw = localStorage.getItem(cartStorageKey(slug));
       if (raw) setCart(JSON.parse(raw));
-    } catch {}
+    } catch { }
   }, [slug]);
 
   useEffect(() => {
@@ -244,35 +418,62 @@ const CatalogView: React.FC = () => {
 
   useEffect(() => {
     const fetchStoreBySlug = async () => {
-      if (!slug) return;
+      if (!slug) {
+        setStore(null);
+        setCatalogUnavailableReason("not_found");
+        setLoading(false);
+        return;
+      }
+
       setLoading(true);
-      const qStore = query(
-        collection(db, "stores"),
-        where("slug", "==", slug),
-        limit(1),
-      );
-      const snap = await getDocs(qStore);
-      if (!snap.empty) {
-        const storeDoc = snap.docs[0];
-        const data = storeDoc.data() as any;
-        const s: Store = { id: storeDoc.id, ...(data as any) };
-        if (s.isActive === false) {
+      setCatalogUnavailableReason(null);
+      setProducts([]);
+      setCategories([]);
+      setAllProducts([]);
+      setAllLoaded(false);
+      setQueryError(null);
+
+      try {
+        const qStore = query(
+          collection(db, "stores"),
+          where("slug", "==", slug),
+          limit(1),
+        );
+
+        const snap = await getDocs(qStore);
+
+        if (snap.empty) {
           setStore(null);
+          setCatalogUnavailableReason("not_found");
           setLoading(false);
           return;
         }
+
+        const storeDoc = snap.docs[0];
+        const data = storeDoc.data() as any;
+        const s: Store = { id: storeDoc.id, ...(data as any) };
+        const unavailableReason = getCatalogUnavailableReason(s);
+
         setStore(s);
-        document.title = `${s.name} | Catálogo`;
-      } else {
+        setCatalogUnavailableReason(unavailableReason);
+        document.title = unavailableReason
+          ? `${s.name} | Catálogo no disponible`
+          : `${s.name} | Catálogo`;
+
+        setLoading(false);
+      } catch (error) {
+        console.error("fetchStoreBySlug error:", error);
         setStore(null);
+        setCatalogUnavailableReason("not_found");
         setLoading(false);
       }
     };
+
     fetchStoreBySlug();
   }, [slug]);
 
   useEffect(() => {
-    if (!store) return;
+    if (!store || catalogUnavailableReason) return;
     const qCats = query(
       collection(db, "stores", store.id, "categories"),
       orderBy("order", "asc"),
@@ -281,7 +482,7 @@ const CatalogView: React.FC = () => {
       setCategories(snap.docs.map((d) => ({ id: d.id, ...(d.data() as any) })));
     });
     return () => unsubscribeCats();
-  }, [store]);
+  }, [store, catalogUnavailableReason]);
 
   useEffect(() => {
     if (!categories.length) return;
@@ -336,11 +537,11 @@ const CatalogView: React.FC = () => {
 
   const storeIdRef = useRef<string | null>(null);
   useEffect(() => {
-    if (!store) return;
+    if (!store || catalogUnavailableReason) return;
     storeIdRef.current = store.id;
     if (!isSearching) return;
     fetchAllProductsOnce(store.id);
-  }, [store?.id, isSearching, fetchAllProductsOnce]);
+  }, [store?.id, catalogUnavailableReason, isSearching, fetchAllProductsOnce]);
 
   const fetchFirstPage = useCallback(
     async (storeId: string, categoryId: string) => {
@@ -401,7 +602,7 @@ const CatalogView: React.FC = () => {
   );
 
   const fetchMorePage = useCallback(async () => {
-    if (!store || !lastDoc || !hasMore || loadingMore) return;
+    if (!store || catalogUnavailableReason || !lastDoc || !hasMore || loadingMore) return;
     setLoadingMore(true);
     setQueryError(null);
     try {
@@ -445,21 +646,21 @@ const CatalogView: React.FC = () => {
     } finally {
       setLoadingMore(false);
     }
-  }, [store, lastDoc, hasMore, loadingMore, activeCategoryId]);
+  }, [store, catalogUnavailableReason, lastDoc, hasMore, loadingMore, activeCategoryId]);
 
   useEffect(() => {
-    if (!store) return;
+    if (!store || catalogUnavailableReason) return;
     fetchFirstPage(store.id, activeCategoryId);
-  }, [store?.id, activeCategoryId, fetchFirstPage]);
+  }, [store?.id, catalogUnavailableReason, activeCategoryId, fetchFirstPage]);
 
   useEffect(() => {
-    if (!store) return;
+    if (!store || catalogUnavailableReason) return;
     const cached = allProductsCache.get(store.id);
     if (cached) {
       setAllProducts(cached);
       setAllLoaded(true);
     }
-  }, [store?.id]);
+  }, [store?.id, catalogUnavailableReason]);
 
   const addToCart = (prod: Product, variant?: Variant) => {
     const baseUnitPrice = getBaseUnitPrice(prod, variant);
@@ -518,7 +719,7 @@ const CatalogView: React.FC = () => {
   };
 
   const placeOrder = async () => {
-    if (!store) return;
+    if (!store || catalogUnavailableReason) return;
     if (!cart.length) return;
     const cleanName = customerName.trim();
     const cleanPhone = customerPhone.trim().replace(/[^\d]/g, "");
@@ -710,7 +911,7 @@ const CatalogView: React.FC = () => {
     if (navigator.share) {
       try {
         await navigator.share({ title: store?.name, url });
-      } catch {}
+      } catch { }
     } else {
       await navigator.clipboard.writeText(url);
       setShareToast(true);
@@ -734,10 +935,14 @@ const CatalogView: React.FC = () => {
       </div>
     );
   if (!store)
+    return <CatalogUnavailableScreen reason="not_found" />;
+
+  if (catalogUnavailableReason)
     return (
-      <div className="h-screen flex items-center justify-center text-gray-500">
-        Tienda no encontrada.
-      </div>
+      <CatalogUnavailableScreen
+        store={store}
+        reason={catalogUnavailableReason}
+      />
     );
 
   return (
@@ -1398,7 +1603,7 @@ const CatalogView: React.FC = () => {
                         ) : null}
                         <div className="text-sm font-extrabold mt-1">
                           {typeof it.originalUnitPrice === "number" &&
-                          it.originalUnitPrice > it.unitPrice ? (
+                            it.originalUnitPrice > it.unitPrice ? (
                             <div className="flex items-baseline gap-2">
                               <span className="text-xs text-gray-400 line-through font-bold">
                                 {formatCOP(it.originalUnitPrice)}
