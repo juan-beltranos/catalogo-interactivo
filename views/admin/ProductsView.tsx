@@ -34,6 +34,7 @@ import { ref, uploadBytes, getDownloadURL, deleteObject } from "firebase/storage
 import { storage } from "../../lib/firebase";
 import ImportProductsExcel from "@/components/catalog/ImportProductsExcel";
 import { cloudinaryConfig } from "@/lib/cloudinary";
+import * as XLSX from "xlsx";
 
 import {
   DndContext,
@@ -211,6 +212,7 @@ const ProductsView: React.FC = () => {
 
   // ── Drag & drop state ────────────────────────────────────────────────────
   const [savingOrder, setSavingOrder] = useState(false);
+  const [exportingExcel, setExportingExcel] = useState(false);
 
   // Create form
   const [name, setName] = useState("");
@@ -374,6 +376,136 @@ const ProductsView: React.FC = () => {
       console.error(e);
     }
   }, [prodsRef, storeId, mapDocToProduct]);
+
+  const getFinalPriceForExport = (product: Product) => {
+    const price = Number(product.price ?? 0);
+    const discount = product.discount;
+
+    if (!discount || !discount.value) return price;
+
+    if (discount.type === "percent") {
+      return Math.max(
+        0,
+        Math.round(price * (1 - Math.min(100, Math.max(0, discount.value)) / 100))
+      );
+    }
+
+    return Math.max(0, price - Math.max(0, discount.value));
+  };
+
+  const exportProductsToExcel = async () => {
+    if (!prodsRef || !storeId) {
+      alert("La tienda aún no está lista.");
+      return;
+    }
+
+    setExportingExcel(true);
+
+    try {
+      const snap = await getDocs(query(prodsRef, orderBy("createdAt", "desc")));
+      const exportedProducts = snap.docs.map(mapDocToProduct);
+
+      // Respeta el orden manual cuando existe.
+      exportedProducts.sort((a, b) => {
+        const orderA = typeof a.order === "number" ? a.order : Number.MAX_SAFE_INTEGER;
+        const orderB = typeof b.order === "number" ? b.order : Number.MAX_SAFE_INTEGER;
+
+        if (orderA !== orderB) return orderA - orderB;
+
+        return String(a.name || "").localeCompare(String(b.name || ""));
+      });
+
+      const categoryMap = new Map(categories.map((cat) => [cat.id, cat.name]));
+
+      const rows = exportedProducts.map((product, index) => {
+        const images = product.images ?? [];
+        const videos = product.videos ?? [];
+        const variants = product.variants ?? [];
+        const options = product.options ?? [];
+        const discount = product.discount;
+
+        return {
+          Orden: product.order ?? index,
+          ID: product.id,
+          Nombre: product.name ?? "",
+          SKU: product.sku ?? "",
+          Descripción: product.description ?? "",
+          Categoría: categoryMap.get(product.categoryId ?? "") ?? "",
+          "ID Categoría": product.categoryId ?? "",
+          Precio: Number(product.price ?? 0),
+          "Precio formateado": formatCOP(Number(product.price ?? 0)),
+          "Tiene descuento": discount ? "Sí" : "No",
+          "Tipo descuento": discount?.type ?? "",
+          "Valor descuento": discount?.value ?? "",
+          "Precio final": getFinalPriceForExport(product),
+          "Precio final formateado": formatCOP(getFinalPriceForExport(product)),
+          "Visible en catálogo": product.isActive ? "Sí" : "No",
+          "Cantidad imágenes": images.length,
+          "Imágenes URLs": images.map((img) => img.url).join(" | "),
+          "Imágenes publicId/path": images
+            .map((img: any) => img.publicId || img.path || "")
+            .filter(Boolean)
+            .join(" | "),
+          "Cantidad videos": videos.length,
+          "Videos URLs": videos.map((video) => video.url).join(" | "),
+          "Videos path": videos
+            .map((video: any) => video.path || "")
+            .filter(Boolean)
+            .join(" | "),
+          "Tiene variantes": variants.length > 0 ? "Sí" : "No",
+          "Cantidad variantes": variants.length,
+          Variantes: variants.length ? JSON.stringify(variants) : "",
+          Opciones: options.length ? JSON.stringify(options) : "",
+        };
+      });
+
+      if (!rows.length) {
+        alert("No hay productos para exportar.");
+        return;
+      }
+
+      const worksheet = XLSX.utils.json_to_sheet(rows);
+
+      worksheet["!cols"] = [
+        { wch: 8 },
+        { wch: 24 },
+        { wch: 32 },
+        { wch: 18 },
+        { wch: 45 },
+        { wch: 24 },
+        { wch: 24 },
+        { wch: 14 },
+        { wch: 18 },
+        { wch: 16 },
+        { wch: 16 },
+        { wch: 16 },
+        { wch: 14 },
+        { wch: 22 },
+        { wch: 18 },
+        { wch: 18 },
+        { wch: 60 },
+        { wch: 45 },
+        { wch: 16 },
+        { wch: 60 },
+        { wch: 45 },
+        { wch: 16 },
+        { wch: 18 },
+        { wch: 60 },
+        { wch: 60 },
+      ];
+
+      const workbook = XLSX.utils.book_new();
+      XLSX.utils.book_append_sheet(workbook, worksheet, "Productos");
+
+      const date = new Date().toISOString().slice(0, 10);
+      XLSX.writeFile(workbook, `productos-${date}.xlsx`);
+    } catch (error) {
+      console.error("Error exportando productos:", error);
+      alert("No se pudieron exportar los productos.");
+    } finally {
+      setExportingExcel(false);
+    }
+  };
 
   const normalize = (s: string) =>
     (s || "").toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").trim();
@@ -1005,9 +1137,44 @@ const ProductsView: React.FC = () => {
         {/* LIST */}
         <div className="lg:col-span-2 bg-white rounded-xl border overflow-hidden">
           <div className="p-4 border-b bg-white">
-            <div className="flex gap-2 items-center">
-              <input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Buscar por nombre, SKU o descripción..." className="w-full p-2 border rounded" />
-              {search ? (<button type="button" onClick={() => setSearch("")} className="px-3 py-2 border rounded text-sm">Limpiar</button>) : null}
+            <div className="flex flex-col sm:flex-row gap-2 sm:items-center">
+              <input
+                value={search}
+                onChange={(e) => setSearch(e.target.value)}
+                placeholder="Buscar por nombre, SKU o descripción..."
+                className="w-full p-2 border rounded"
+              />
+
+              <div className="flex gap-2">
+                {search ? (
+                  <button
+                    type="button"
+                    onClick={() => setSearch("")}
+                    className="px-3 py-2 border rounded text-sm"
+                  >
+                    Limpiar
+                  </button>
+                ) : null}
+
+                <button
+                  type="button"
+                  onClick={exportProductsToExcel}
+                  disabled={exportingExcel}
+                  className="px-3 py-2 rounded text-sm font-semibold bg-emerald-600 text-white hover:bg-emerald-700 disabled:opacity-50 whitespace-nowrap"
+                >
+                  {exportingExcel ? (
+                    <>
+                      <i className="fa-solid fa-spinner fa-spin mr-2" />
+                      Exportando
+                    </>
+                  ) : (
+                    <>
+                      <i className="fa-solid fa-file-excel mr-2" />
+                      Exportar Excel
+                    </>
+                  )}
+                </button>
+              </div>
             </div>
             {search ? (
               <div className="mt-2 text-xs text-gray-500">
