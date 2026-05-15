@@ -214,6 +214,9 @@ const ProductsView: React.FC = () => {
   const [savingOrder, setSavingOrder] = useState(false);
   const [exportingExcel, setExportingExcel] = useState(false);
 
+  const importExcelRef = useRef<HTMLInputElement | null>(null);
+  const [importingExcel, setImportingExcel] = useState(false);
+
   // Create form
   const [name, setName] = useState("");
   const [description, setDescription] = useState("");
@@ -504,6 +507,269 @@ const ProductsView: React.FC = () => {
       alert("No se pudieron exportar los productos.");
     } finally {
       setExportingExcel(false);
+    }
+  };
+
+  const parseBooleanFromExcel = (value: any) => {
+    const normalized = String(value ?? "")
+      .trim()
+      .toLowerCase()
+      .normalize("NFD")
+      .replace(/[\u0300-\u036f]/g, "");
+
+    return normalized === "si" || normalized === "sí" || normalized === "true" || normalized === "1";
+  };
+
+  const parseJsonSafe = <T,>(value: any, fallback: T): T => {
+    if (!value) return fallback;
+
+    try {
+      const parsed = JSON.parse(String(value));
+      return parsed;
+    } catch {
+      return fallback;
+    }
+  };
+
+  const importProductsFromExcel = async (file: File) => {
+    if (!storeId || !prodsRef || !catsRef) {
+      alert("La tienda aún no está lista.");
+      return;
+    }
+
+    setImportingExcel(true);
+
+    try {
+      const buffer = await file.arrayBuffer();
+      const workbook = XLSX.read(buffer, { type: "array" });
+      const sheetName = workbook.SheetNames[0];
+      const worksheet = workbook.Sheets[sheetName];
+
+      const rows = XLSX.utils.sheet_to_json<any>(worksheet, {
+        defval: "",
+      });
+
+      if (!rows.length) {
+        alert("El Excel no tiene productos para importar.");
+        return;
+      }
+
+      // ─────────────────────────────────────────────
+      // Productos existentes para relacionar/actualizar
+      // ─────────────────────────────────────────────
+      const productsSnap = await getDocs(prodsRef);
+
+      const existingProducts = productsSnap.docs.map((d) => ({
+        id: d.id,
+        data: d.data() as any,
+      }));
+
+      const existingById = new Map(existingProducts.map((p) => [p.id, p]));
+
+      const existingBySku = new Map(
+        existingProducts
+          .filter((p) => String(p.data.sku ?? "").trim())
+          .map((p) => [normalizeText(p.data.sku), p])
+      );
+
+      const existingByName = new Map(
+        existingProducts
+          .filter((p) => String(p.data.name ?? "").trim())
+          .map((p) => [normalizeText(p.data.name), p])
+      );
+
+      // ─────────────────────────────────────────────
+      // Categorías existentes desde Firestore
+      // No confiamos solo en el estado `categories`
+      // ─────────────────────────────────────────────
+      const categoriesSnap = await getDocs(catsRef);
+
+      const dbCategories = categoriesSnap.docs.map((d) => ({
+        id: d.id,
+        name: String(d.data().name ?? ""),
+        order: Number(d.data().order ?? 0) || 0,
+      }));
+
+      const categoryMap = new Map<string, string>();
+      const categoryIds = new Set<string>();
+
+      dbCategories.forEach((cat) => {
+        categoryIds.add(cat.id);
+        categoryMap.set(normalizeText(cat.name), cat.id);
+      });
+
+      let categoryOrderCounter = dbCategories.length
+        ? Math.max(...dbCategories.map((cat) => cat.order)) + 1
+        : 1;
+
+      let created = 0;
+      let updated = 0;
+      let skipped = 0;
+      let createdCategories = 0;
+
+      const countSnap = await getCountFromServer(prodsRef);
+      let orderCounter = countSnap.data().count;
+
+      for (const row of rows) {
+        const excelId = String(row["ID"] ?? "").trim();
+        const name = String(row["Nombre"] ?? "").trim();
+        const skuValue = String(row["SKU"] ?? "").trim();
+
+        if (!name) {
+          skipped++;
+          continue;
+        }
+
+        const priceRaw = row["Precio"];
+        const priceFormattedRaw = row["Precio formateado"];
+        const price = parseNumberSafe(priceRaw || priceFormattedRaw);
+
+        const categoryName = String(row["Categoría"] ?? "").trim();
+        const categoryIdFromExcel = String(row["ID Categoría"] ?? "").trim();
+
+        let finalCategoryId = "";
+
+        // Importante:
+        // Solo usamos el ID de categoría del Excel si existe en ESTA tienda.
+        // Si no existe, buscamos/creamos por nombre de categoría.
+        if (categoryIdFromExcel && categoryIds.has(categoryIdFromExcel)) {
+          finalCategoryId = categoryIdFromExcel;
+        } else if (categoryName) {
+          const normalizedCategoryName = normalizeText(categoryName);
+          const cachedCategoryId = categoryMap.get(normalizedCategoryName);
+
+          if (cachedCategoryId) {
+            finalCategoryId = cachedCategoryId;
+          } else {
+            const newCategoryRef = await addDoc(catsRef, {
+              name: categoryName,
+              order: categoryOrderCounter++,
+              createdAt: serverTimestamp(),
+              updatedAt: serverTimestamp(),
+            });
+
+            finalCategoryId = newCategoryRef.id;
+            categoryMap.set(normalizedCategoryName, newCategoryRef.id);
+            categoryIds.add(newCategoryRef.id);
+            createdCategories++;
+          }
+        }
+
+        const discountTypeRaw = String(row["Tipo descuento"] ?? "").trim();
+        const discountValue = parseNumberSafe(row["Valor descuento"]);
+
+        const discount =
+          discountTypeRaw && discountValue > 0
+            ? {
+              type: discountTypeRaw === "percent" ? "percent" : "amount",
+              value:
+                discountTypeRaw === "percent"
+                  ? Math.min(100, Math.max(0, discountValue))
+                  : Math.max(0, discountValue),
+            }
+            : null;
+
+        const imagesUrls = String(row["Imágenes URLs"] ?? "")
+          .split("|")
+          .map((url) => url.trim())
+          .filter(Boolean);
+
+        const imagesMeta = String(row["Imágenes publicId/path"] ?? "")
+          .split("|")
+          .map((item) => item.trim());
+
+        const images: ImageItem[] = imagesUrls.map((url, index) => {
+          const meta = imagesMeta[index] || "";
+
+          return {
+            url,
+            ...(meta ? { publicId: meta } : {}),
+          } as ImageItem;
+        });
+
+        const videosUrls = String(row["Videos URLs"] ?? "")
+          .split("|")
+          .map((url) => url.trim())
+          .filter(Boolean);
+
+        const videosPaths = String(row["Videos path"] ?? "")
+          .split("|")
+          .map((item) => item.trim());
+
+        const videos: VideoItem[] = videosUrls.map((url, index) => ({
+          url,
+          path: videosPaths[index] || "",
+        }));
+
+        const variants = parseJsonSafe<Variant[]>(row["Variantes"], []);
+        const options = parseJsonSafe<ProductOption[]>(row["Opciones"], []);
+
+        const orderValue = parseNumberSafe(row["Orden"]);
+        const isActiveValue = parseBooleanFromExcel(row["Visible en catálogo"]);
+
+        const payload = {
+          name,
+          sku: skuValue || null,
+          description: htmlToPlainText(row["Descripción"]),
+          price,
+          discount,
+          categoryId: finalCategoryId,
+          images,
+          videos,
+          options,
+          variants,
+          isActive: isActiveValue,
+          order: Number.isFinite(orderValue) ? orderValue : orderCounter++,
+          updatedAt: serverTimestamp(),
+        };
+
+        const nameKey = normalizeText(name);
+        const skuKey = normalizeText(skuValue);
+
+        // Prioridad para relacionar:
+        // 1. ID exacto del producto
+        // 2. SKU
+        // 3. Nombre normalizado
+        const existingByExcelId = excelId ? existingById.get(excelId) : null;
+        const existingBySkuValue = skuKey ? existingBySku.get(skuKey) : null;
+        const existingByNameValue = nameKey ? existingByName.get(nameKey) : null;
+
+        const existingProduct =
+          existingByExcelId || existingBySkuValue || existingByNameValue;
+
+        if (existingProduct) {
+          await updateDoc(
+            doc(db, "stores", storeId, "products", existingProduct.id),
+            payload
+          );
+          updated++;
+        } else {
+          await addDoc(prodsRef, {
+            ...payload,
+            createdAt: serverTimestamp(),
+          });
+          created++;
+        }
+      }
+
+      await loadFirstPage();
+
+      if (allLoaded) {
+        await reloadAllProducts();
+      }
+
+      if (importExcelRef.current) {
+        importExcelRef.current.value = "";
+      }
+
+      alert(
+        `Importación completada.\nActualizados: ${updated}\nCreados: ${created}\nCategorías creadas: ${createdCategories}\nOmitidos: ${skipped}`
+      );
+    } catch (error) {
+      console.error("Error importando Excel:", error);
+      alert("No se pudo importar el Excel. Revisa que tenga el mismo formato exportado.");
+    } finally {
+      setImportingExcel(false);
     }
   };
 
@@ -1049,6 +1315,16 @@ const ProductsView: React.FC = () => {
       <div className="flex items-center gap-2">
         <input ref={importJsonRef} type="file" accept="application/json,.json" className="hidden"
           onChange={(e) => { const file = e.target.files?.[0]; if (file) handleImportJsonFile(file); }} />
+        <input
+          ref={importExcelRef}
+          type="file"
+          accept=".xlsx,.xls"
+          className="hidden"
+          onChange={(e) => {
+            const file = e.target.files?.[0];
+            if (file) importProductsFromExcel(file);
+          }}
+        />
       </div>
 
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
@@ -1171,6 +1447,24 @@ const ProductsView: React.FC = () => {
                     <>
                       <i className="fa-solid fa-file-excel mr-2" />
                       Exportar Excel
+                    </>
+                  )}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => importExcelRef.current?.click()}
+                  disabled={importingExcel || exportingExcel}
+                  className="px-3 py-2 rounded text-sm font-semibold bg-indigo-600 text-white hover:bg-indigo-700 disabled:opacity-50 whitespace-nowrap"
+                >
+                  {importingExcel ? (
+                    <>
+                      <i className="fa-solid fa-spinner fa-spin mr-2" />
+                      Importando
+                    </>
+                  ) : (
+                    <>
+                      <i className="fa-solid fa-file-import mr-2" />
+                      Importar Excel
                     </>
                   )}
                 </button>
