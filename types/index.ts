@@ -27,6 +27,7 @@ export type Variant = {
 export type Product = {
     id: string;
     name: string;
+    sku?: string;
     description?: string;
     price: number;
     categoryId: string;
@@ -47,6 +48,7 @@ export type CartItem = {
     imageUrl?: string;
     originalUnitPrice?: number; // BASE sin descuento (opcional)
     hasDiscount?: boolean;
+    sku?: string;
 };
 
 

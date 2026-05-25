@@ -673,6 +673,7 @@ const CatalogView: React.FC = () => {
     const item: CartItem = {
       productId: prod.id,
       productName: prod.name,
+      sku: prod.sku ?? undefined,
       variantId: variant?.id,
       variantTitle: variant?.title,
       unitPrice,
@@ -869,7 +870,7 @@ const CatalogView: React.FC = () => {
       cart.forEach((it) => {
         const v = it.variantTitle ? ` (${it.variantTitle})` : "";
         lines.push(
-          `- ${it.qty} x ${it.productName}${v} — ${formatCOP(it.unitPrice * it.qty)}`,
+          `- ${it.qty} x ${it.productName}${v}${it.sku ? ` | SKU: ${it.sku}` : ""} — ${formatCOP(it.unitPrice * it.qty)}`
         );
       });
       lines.push("");

@@ -3,6 +3,7 @@ import { ImageItem, ProductOption, Variant, VideoItem } from "@/types";
 export interface Product {
     id: string;
     name: string;
+    sku?: string;
     description?: string;
     price: number;
     categoryId: string;
@@ -15,7 +16,6 @@ export interface Product {
         type: "percent" | "amount";
         value: number;
     } | null;
-    sku?: string | null;
 }
 
 export interface Store {
