@@ -10,6 +10,7 @@ import {
   where,
 } from "firebase/firestore";
 import { db } from "../../lib/firebase";
+import { getStoreForOwner } from "@/lib/storeLookup";
 import { useAuth } from "../../context/AuthContext";
 import type { Order, OrderStatus } from "@/types";
 import { Store } from "@/interfaces";
@@ -94,23 +95,16 @@ const DashboardView: React.FC = () => {
     const run = async () => {
       setLoading(true);
       try {
-        const qStore = query(
-          collection(db, "stores"),
-          where("ownerUid", "==", user.uid),
-          limit(1)
-        );
-        const snap = await getDocs(qStore);
-
-        if (snap.empty) {
+        const storeResult = await getStoreForOwner(user.uid);
+        if (!storeResult) {
           setStore(null);
           setLoading(false);
           return;
         }
 
-        const d = snap.docs[0];
-        const data = d.data() as any;
+        const data = storeResult.data;
         setStore({
-          id: d.id,
+          id: storeResult.id,
           name: data.name ?? "Mi tienda",
           slug: data.slug ?? "",
           whatsapp: data.whatsapp ?? "",

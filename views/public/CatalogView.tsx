@@ -37,7 +37,6 @@ import {
 import { ImageCarousel } from "@/components/catalog/ImageCarousel";
 import { cldImg } from "@/helpers/cloudinaryUpload";
 import {
-  applyDiscount,
   discountBadgeText,
   getBaseUnitPrice,
   getFinalUnitPrice,
@@ -309,6 +308,11 @@ const CatalogView: React.FC = () => {
 
   const [activeCategoryId, setActiveCategoryId] = useState<string>("all");
   const categoryFromUrl = searchParams.get("category");
+  const isWholesaleCatalog = searchParams.get("tipo") === "mayorista";
+  const cartStorageId = slug
+    ? cartStorageKey(`${slug}:${isWholesaleCatalog ? "mayorista" : "publico"}`)
+    : "";
+  const pendingCartRestoreRef = useRef<string | null>(null);
 
   const [search, setSearch] = useState("");
   const [queryError, setQueryError] = useState<string | null>(null);
@@ -413,17 +417,24 @@ const CatalogView: React.FC = () => {
   }, [search, allProducts, products, activeCategoryId, categoryNameById]);
 
   useEffect(() => {
-    if (!slug) return;
+    if (!cartStorageId) return;
+    pendingCartRestoreRef.current = cartStorageId;
     try {
-      const raw = localStorage.getItem(cartStorageKey(slug));
-      if (raw) setCart(JSON.parse(raw));
-    } catch { }
-  }, [slug]);
+      const raw = localStorage.getItem(cartStorageId);
+      setCart(raw ? JSON.parse(raw) : []);
+    } catch {
+      setCart([]);
+    }
+  }, [cartStorageId]);
 
   useEffect(() => {
-    if (!slug) return;
-    localStorage.setItem(cartStorageKey(slug), JSON.stringify(cart));
-  }, [cart, slug]);
+    if (!cartStorageId) return;
+    if (pendingCartRestoreRef.current === cartStorageId) {
+      pendingCartRestoreRef.current = null;
+      return;
+    }
+    localStorage.setItem(cartStorageId, JSON.stringify(cart));
+  }, [cart, cartStorageId]);
 
   useEffect(() => {
     const fetchStoreBySlug = async () => {
@@ -672,8 +683,8 @@ const CatalogView: React.FC = () => {
   }, [store?.id, catalogUnavailableReason]);
 
   const addToCart = (prod: Product, variant?: Variant) => {
-    const baseUnitPrice = getBaseUnitPrice(prod, variant);
-    const unitPrice = getFinalUnitPrice(prod, variant);
+    const baseUnitPrice = getBaseUnitPrice(prod, variant, isWholesaleCatalog);
+    const unitPrice = getFinalUnitPrice(prod, variant, isWholesaleCatalog);
     if (!unitPrice) return;
     if (variant && typeof variant.stock === "number" && variant.stock <= 0) {
       alert("Esta variante está agotada.");
@@ -687,6 +698,7 @@ const CatalogView: React.FC = () => {
       variantTitle: variant?.title,
       unitPrice,
       originalUnitPrice: baseUnitPrice,
+      priceType: isWholesaleCatalog ? "wholesale" : "retail",
       hasDiscount: hasValidDiscount((prod as any).discount),
       qty: 1,
       imageUrl: getProductMainImage(prod),
@@ -759,6 +771,7 @@ const CatalogView: React.FC = () => {
         variantId: it.variantId ?? null,
         variantTitle: it.variantTitle ?? null,
         unitPrice: it.unitPrice,
+        priceType: it.priceType ?? (isWholesaleCatalog ? "wholesale" : "retail"),
         qty: it.qty,
         subtotal: it.unitPrice * it.qty,
       }));
@@ -861,6 +874,7 @@ const CatalogView: React.FC = () => {
             address: cleanAddress,
           },
           notes: customerNotes.trim() || "",
+          customerType: isWholesaleCatalog ? "wholesale" : "retail",
           items,
         subtotal,
         shippingMethod: selectedShipping ?? null,
@@ -876,6 +890,7 @@ const CatalogView: React.FC = () => {
       const lines: string[] = [];
       lines.push("🛒 *Nuevo pedido*");
       lines.push(`Tienda: *${store.name}*`);
+      lines.push(`Tipo de cliente: *${isWholesaleCatalog ? "Mayorista" : "Público general"}*`);
       lines.push(`Pedido ID: ${orderRef.id}`);
       lines.push("");
       lines.push(`👤 Cliente: *${cleanName}*`);
@@ -1032,6 +1047,12 @@ const CatalogView: React.FC = () => {
                       Cerrado en este momento
                     </span>
                   )}
+                  {isWholesaleCatalog ? (
+                    <span className="inline-flex items-center gap-1 text-xs font-bold text-indigo-700 bg-indigo-50 border border-indigo-200 rounded-full px-2.5 py-0.5">
+                      <i className="fa-solid fa-tags text-[10px]" />
+                      Catálogo mayorista
+                    </span>
+                  ) : null}
                 </div>
 
                 {description ? (
@@ -1259,8 +1280,8 @@ const CatalogView: React.FC = () => {
                 : "";
               const hasVariants = (prod.variants?.length ?? 0) > 0;
               const badge = discountBadgeText((prod as any).discount);
-              const discOk = hasValidDiscount(prod);
-              const cardPrice = getProductCardPrice(prod);
+              const discOk = !isWholesaleCatalog && hasValidDiscount(prod);
+              const cardPrice = getProductCardPrice(prod, isWholesaleCatalog);
 
               return (
                 <div
@@ -1286,7 +1307,7 @@ const CatalogView: React.FC = () => {
                         <i className="fa-regular fa-image text-2xl" />
                       </div>
                     )}
-                    {badge ? (
+                    {!isWholesaleCatalog && badge ? (
                       <div className="absolute top-3 left-3 z-20 pointer-events-none">
                         <span className="inline-flex items-center rounded-full bg-yellow-400 text-white px-3 py-1 text-xs font-extrabold shadow-sm">
                           {badge}
@@ -1459,10 +1480,10 @@ const CatalogView: React.FC = () => {
               <div className="flex items-center justify-between">
                 <div className="text-sm text-gray-500">Precio</div>
                 {(() => {
-                  const modalPrice = getProductCardPrice(productModal.product);
+                  const modalPrice = getProductCardPrice(productModal.product, isWholesaleCatalog);
                   return (
                     <div className="font-extrabold">
-                      {hasValidDiscount(productModal.product) ? (
+                      {!isWholesaleCatalog && hasValidDiscount(productModal.product) ? (
                         <div className="flex items-baseline gap-2">
                           <span className="text-xs text-gray-400 line-through font-bold">
                             {modalPrice.hasVariants
@@ -1493,8 +1514,8 @@ const CatalogView: React.FC = () => {
                       const outOfStock = typeof v.stock === "number" && v.stock <= 0;
                       const selected = productModal.selectedVariantId === v.id;
                       const d = (productModal.product as any).discount;
-                      const base = Number(v.price || 0);
-                      const final = applyDiscount(base, d);
+                      const base = getBaseUnitPrice(productModal.product, v, isWholesaleCatalog);
+                      const final = getFinalUnitPrice(productModal.product, v, isWholesaleCatalog);
                       return (
                         <button
                           key={v.id}
@@ -1515,7 +1536,7 @@ const CatalogView: React.FC = () => {
                             <div className="font-extrabold text-gray-900">{v.title}</div>
                           </div>
                           <div className="font-extrabold">
-                            {hasValidDiscount(productModal.product) ? (
+                            {!isWholesaleCatalog && hasValidDiscount(productModal.product) ? (
                               <div className="flex items-baseline gap-2">
                                 <span className="text-xs text-gray-400 line-through font-bold">
                                   {formatCOP(base)}

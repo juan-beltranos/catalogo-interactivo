@@ -30,6 +30,7 @@ export type Product = {
     sku?: string;
     description?: string;
     price: number;
+    wholesalePrice?: number | null;
     categoryId: string;
     imageUrl?: string;
     images?: ImageItem[];
@@ -45,6 +46,7 @@ export type CartItem = {
     variantId?: string;
     variantTitle?: string;
     unitPrice: number; // COP int
+    priceType?: "retail" | "wholesale";
     qty: number;
     imageUrl?: string;
     allowsCashOnDelivery?: boolean;

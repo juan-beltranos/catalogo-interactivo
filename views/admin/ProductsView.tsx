@@ -21,6 +21,7 @@ import {
   writeBatch,
 } from "firebase/firestore";
 import { db } from "../../lib/firebase";
+import { getStoreForOwner } from "@/lib/storeLookup";
 import { useAuth } from "../../context/AuthContext";
 import { Product } from "@/interfaces";
 import { ImageItem, ImportedJsonProduct, ProductOption, Variant, VideoItem } from "@/types";
@@ -32,7 +33,6 @@ import Paginator from "@/components/catalog/Paginator";
 import { cldImg, uploadImagesToCloudinary } from "@/helpers/cloudinaryUpload";
 import { ref, uploadBytes, getDownloadURL, deleteObject } from "firebase/storage";
 import { storage } from "../../lib/firebase";
-import ImportProductsExcel from "@/components/catalog/ImportProductsExcel";
 import { cloudinaryConfig } from "@/lib/cloudinary";
 import * as XLSX from "xlsx";
 
@@ -221,6 +221,7 @@ const ProductsView: React.FC = () => {
   const [name, setName] = useState("");
   const [description, setDescription] = useState("");
   const [priceInput, setPriceInput] = useState("");
+  const [wholesalePriceInput, setWholesalePriceInput] = useState("");
   const [categoryId, setCategoryId] = useState("");
   const [imageFiles, setImageFiles] = useState<File[]>([]);
   const [isSubmitting, setIsSubmitting] = useState(false);
@@ -242,6 +243,7 @@ const ProductsView: React.FC = () => {
   const [editDiscountValueInput, setEditDiscountValueInput] = useState("");
   const [editingProduct, setEditingProduct] = useState<Product | null>(null);
   const [editPriceInput, setEditPriceInput] = useState("");
+  const [editWholesalePriceInput, setEditWholesalePriceInput] = useState("");
 
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const [videoFiles, setVideoFiles] = useState<File[]>([]);
@@ -266,12 +268,10 @@ const ProductsView: React.FC = () => {
   useEffect(() => {
     if (!user) return;
     const fetchStore = async () => {
-      const q = query(collection(db, "stores"), where("ownerUid", "==", user.uid));
-      const snap = await getDocs(q);
-      if (!snap.empty) {
-        const storeDoc = snap.docs[0];
-        setStoreId(storeDoc.id);
-        setHasActiveSubscription(storeDoc.data().hasActiveSubscription === true);
+      const store = await getStoreForOwner(user.uid);
+      if (store) {
+        setStoreId(store.id);
+        setHasActiveSubscription(store.data.hasActiveSubscription === true);
       } else {
         console.error("No se encontró tienda para este usuario");
       }
@@ -303,6 +303,7 @@ const ProductsView: React.FC = () => {
         discount: data.discount ?? null,
         description: data.description ?? "",
         price: Number(data.price ?? 0),
+        wholesalePrice: data.wholesalePrice ?? null,
         categoryId: data.categoryId ?? "",
         images: (data.images ?? []) as ImageItem[],
         videos: (data.videos ?? []) as VideoItem[],
@@ -439,12 +440,14 @@ const ProductsView: React.FC = () => {
           "ID Categoría": product.categoryId ?? "",
           Precio: Number(product.price ?? 0),
           "Precio formateado": formatCOP(Number(product.price ?? 0)),
+          "Precio mayorista": product.wholesalePrice ?? "",
           "Tiene descuento": discount ? "Sí" : "No",
           "Tipo descuento": discount?.type ?? "",
           "Valor descuento": discount?.value ?? "",
           "Precio final": getFinalPriceForExport(product),
           "Precio final formateado": formatCOP(getFinalPriceForExport(product)),
           "Visible en catálogo": product.isActive ? "Sí" : "No",
+          "Envío contra entrega": (product.allowsCashOnDelivery ?? true) ? "Sí" : "No",
           "Cantidad imágenes": images.length,
           "Imágenes URLs": images.map((img) => img.url).join(" | "),
           "Imágenes publicId/path": images
@@ -510,6 +513,54 @@ const ProductsView: React.FC = () => {
     } finally {
       setExportingExcel(false);
     }
+  };
+
+  const downloadImportTemplate = () => {
+    const productsSheet = XLSX.utils.json_to_sheet([
+      {
+        ID: "",
+        Nombre: "Producto de ejemplo",
+        SKU: "EJ-001",
+        Descripción: "Descripción opcional",
+        Categoría: "General",
+        Precio: 100000,
+        "Precio mayorista": 80000,
+        "Tiene descuento": "No",
+        "Tipo descuento": "",
+        "Valor descuento": "",
+        "Visible en catálogo": "Sí",
+        "Envío contra entrega": "Sí",
+        Orden: 1,
+        Variantes: "",
+        Opciones: "",
+      },
+    ]);
+
+    productsSheet["!cols"] = [
+      { wch: 24 }, { wch: 30 }, { wch: 18 }, { wch: 42 }, { wch: 22 },
+      { wch: 16 }, { wch: 20 }, { wch: 18 }, { wch: 18 }, { wch: 20 },
+      { wch: 22 }, { wch: 24 }, { wch: 10 }, { wch: 45 }, { wch: 45 },
+    ];
+
+    const instructionsSheet = XLSX.utils.aoa_to_sheet([
+      ["Campo", "Cómo usarlo"],
+      ["ID", "Opcional. Úsalo para actualizar exactamente un producto exportado."],
+      ["SKU", "Opcional. Si coincide con un producto existente, se actualiza."],
+      ["Nombre", "Obligatorio. También se usa para encontrar productos existentes si no hay ID o SKU."],
+      ["Categoría", "Se crea automáticamente si no existe."],
+      ["Precio", "Obligatorio. Usa solo números, por ejemplo 100000."],
+      ["Precio mayorista", "Opcional. Se muestra únicamente en el enlace mayorista. Déjalo vacío para usar el precio normal."],
+      ["Envío contra entrega", "Escribe Sí o No. Si queda vacío, los productos nuevos lo tendrán habilitado y las actualizaciones no cambiarán el valor actual."],
+      ["Visible en catálogo", "Escribe Sí o No. Si queda vacío, el producto se importará como activo."],
+      ["Descuento", "Usa Tiene descuento, Tipo descuento (percent o amount) y Valor descuento."],
+      ["Variantes y Opciones", "Opcional. Si las usas, conserva el formato JSON de un archivo exportado."],
+    ]);
+    instructionsSheet["!cols"] = [{ wch: 25 }, { wch: 105 }];
+
+    const workbook = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(workbook, productsSheet, "Productos");
+    XLSX.utils.book_append_sheet(workbook, instructionsSheet, "Instrucciones");
+    XLSX.writeFile(workbook, "plantilla-importacion-productos.xlsx");
   };
 
   const parseBooleanFromExcel = (value: any) => {
@@ -625,6 +676,13 @@ const ProductsView: React.FC = () => {
         const priceRaw = row["Precio"];
         const priceFormattedRaw = row["Precio formateado"];
         const price = parseNumberSafe(priceRaw || priceFormattedRaw);
+        const wholesalePriceRaw = row["Precio mayorista"];
+        const hasWholesalePrice = String(wholesalePriceRaw ?? "").trim() !== "";
+        const wholesalePrice = hasWholesalePrice
+          ? (parseNumberSafe(wholesalePriceRaw) || null)
+          : null;
+        const cashOnDeliveryRaw = row["Envío contra entrega"] ?? row["Envio contra entrega"];
+        const hasCashOnDeliveryValue = String(cashOnDeliveryRaw ?? "").trim() !== "";
 
         const categoryName = String(row["Categoría"] ?? "").trim();
         const categoryIdFromExcel = String(row["ID Categoría"] ?? "").trim();
@@ -707,7 +765,16 @@ const ProductsView: React.FC = () => {
         const options = parseJsonSafe<ProductOption[]>(row["Opciones"], []);
 
         const orderValue = parseNumberSafe(row["Orden"]);
-        const isActiveValue = parseBooleanFromExcel(row["Visible en catálogo"]);
+        const isActiveRaw = row["Visible en catálogo"];
+        const hasIsActiveValue = String(isActiveRaw ?? "").trim() !== "";
+        const isActiveValue = hasIsActiveValue
+          ? parseBooleanFromExcel(isActiveRaw)
+          : true;
+        const optionalImportFields: Record<string, any> = {};
+        if (hasWholesalePrice) optionalImportFields.wholesalePrice = wholesalePrice;
+        if (hasCashOnDeliveryValue) {
+          optionalImportFields.allowsCashOnDelivery = parseBooleanFromExcel(cashOnDeliveryRaw);
+        }
 
         const payload = {
           name,
@@ -722,6 +789,7 @@ const ProductsView: React.FC = () => {
           variants,
           isActive: isActiveValue,
           order: Number.isFinite(orderValue) ? orderValue : orderCounter++,
+          ...optionalImportFields,
           updatedAt: serverTimestamp(),
         };
 
@@ -748,6 +816,10 @@ const ProductsView: React.FC = () => {
         } else {
           await addDoc(prodsRef, {
             ...payload,
+            wholesalePrice: hasWholesalePrice ? wholesalePrice : null,
+            allowsCashOnDelivery: hasCashOnDeliveryValue
+              ? parseBooleanFromExcel(cashOnDeliveryRaw)
+              : true,
             createdAt: serverTimestamp(),
           });
           created++;
@@ -849,7 +921,7 @@ const ProductsView: React.FC = () => {
 
   const resetCreateForm = () => {
     if (fileInputRef.current) fileInputRef.current.value = "";
-    setName(""); setDescription(""); setPriceInput(""); setCategoryId(""); setSku("");
+    setName(""); setDescription(""); setPriceInput(""); setWholesalePriceInput(""); setCategoryId(""); setSku("");
     setHasDiscount(false); setDiscountType("percent"); setDiscountValueInput("");
     setImageFiles([]); setVideoFiles([]); setUseVariants(false); setCreateVariants([]); setIsActive(true); setAllowsCashOnDelivery(true);
   };
@@ -1029,6 +1101,7 @@ const ProductsView: React.FC = () => {
       const videos = await uploadVideos(allowedVideos);
       const variants = useVariants ? (createVariants || []) : [];
       const cleanSku = sku.trim() || null;
+      const wholesalePrice = parseCOP(wholesalePriceInput) || null;
       const discount = hasDiscount && discountValueNum > 0
         ? { type: discountType, value: discountType === "percent" ? Math.min(100, Math.max(0, discountValueNum)) : Math.max(0, discountValueNum) }
         : null;
@@ -1038,7 +1111,7 @@ const ProductsView: React.FC = () => {
       const newOrder = countSnap.data().count;
 
       await addDoc(prodsRef, {
-        name: cleanName, sku: cleanSku, description: description.trim(), price: bp, discount,
+        name: cleanName, sku: cleanSku, description: description.trim(), price: bp, wholesalePrice, discount,
         categoryId, images, videos, options: [], variants, isActive, allowsCashOnDelivery,
         order: newOrder,
         createdAt: serverTimestamp(), updatedAt: serverTimestamp(),
@@ -1072,6 +1145,7 @@ const ProductsView: React.FC = () => {
   const openEdit = (p: Product) => {
     setEditingProduct(p);
     setEditPriceInput(String(p.price));
+    setEditWholesalePriceInput(p.wholesalePrice ? String(p.wholesalePrice) : "");
     setEditUseVariants((p.variants?.length ?? 0) > 0);
     setEditSku(p.sku ?? "");
     if (p.discount) {
@@ -1093,6 +1167,7 @@ const ProductsView: React.FC = () => {
       const bp = parseCOP(editPriceInput);
       const prodRef = doc(db, "stores", storeId, "products", editingProduct.id);
       const cleanSku = editSku.trim() || null;
+      const wholesalePrice = parseCOP(editWholesalePriceInput) || null;
       const discount = editHasDiscount && editDiscountValueNum > 0
         ? { type: editDiscountType, value: editDiscountType === "percent" ? Math.min(100, Math.max(0, editDiscountValueNum)) : Math.max(0, editDiscountValueNum) }
         : null;
@@ -1100,7 +1175,7 @@ const ProductsView: React.FC = () => {
       await updateDoc(prodRef, {
         name: editingProduct.name.trim(), sku: cleanSku,
         description: (editingProduct.description ?? "").trim(),
-        price: bp, discount, categoryId: editingProduct.categoryId, options: [],
+        price: bp, wholesalePrice, discount, categoryId: editingProduct.categoryId, options: [],
         variants: editUseVariants ? (editingProduct.variants ?? []) : [],
         images: editingProduct.images ?? [], videos: editingProduct.videos ?? [],
         isActive: editingProduct.isActive ?? true,
@@ -1331,7 +1406,7 @@ const ProductsView: React.FC = () => {
         />
       </div>
 
-      <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
+      <div className="grid grid-cols-1 gap-8">
         {/* CREATE */}
         <div className="bg-white p-6 rounded-xl border">
           <h2 className="font-bold mb-4">Añadir Producto</h2>
@@ -1339,6 +1414,11 @@ const ProductsView: React.FC = () => {
             <input type="text" placeholder="Nombre" value={name} onChange={(e) => setName(e.target.value)} className="w-full p-2 border rounded" required />
             <textarea placeholder="Descripción (opcional)" value={description} onChange={(e) => setDescription(e.target.value)} className="w-full p-2 border rounded" rows={3} />
             <input type="text" placeholder="Precio (COP) ej: 250000 o 250.000" value={priceInput} onChange={(e) => setPriceInput(e.target.value)} className="w-full p-2 border rounded" required />
+            <div>
+              <label className="text-xs text-gray-500">Precio mayorista (COP)</label>
+              <input type="text" placeholder="Opcional. Ej: 200000 o 200.000" value={wholesalePriceInput} onChange={(e) => setWholesalePriceInput(e.target.value)} className="w-full mt-1 p-2 border rounded" />
+              <div className="mt-1 text-xs text-gray-400">Solo se muestra en el enlace del catálogo mayorista.</div>
+            </div>
 
             <div className="border rounded-lg p-3">
               <div className="flex items-center justify-between">
@@ -1435,7 +1515,7 @@ const ProductsView: React.FC = () => {
                 className="w-full p-2 border rounded"
               />
 
-              <div className="flex gap-2">
+              <div className="flex flex-wrap gap-2">
                 {search ? (
                   <button
                     type="button"
@@ -1463,6 +1543,16 @@ const ProductsView: React.FC = () => {
                       Exportar Excel
                     </>
                   )}
+                </button>
+                <button
+                  type="button"
+                  onClick={downloadImportTemplate}
+                  disabled={importingExcel || exportingExcel}
+                  className="px-3 py-2 rounded text-sm font-semibold bg-white border border-gray-300 text-gray-700 hover:bg-gray-50 disabled:opacity-50 whitespace-nowrap"
+                  title="Descargar plantilla para importar productos"
+                >
+                  <i className="fa-solid fa-download mr-2" />
+                  Plantilla Excel
                 </button>
                 <button
                   type="button"
@@ -1667,6 +1757,11 @@ const ProductsView: React.FC = () => {
                   <label className="text-xs text-gray-500">Precio base (COP)</label>
                   <input type="text" value={editPriceInput} onChange={(e) => setEditPriceInput(e.target.value)} className="w-full p-2 border rounded" />
                   <div className="text-xs text-gray-400 mt-1">Preview: {formatCOP(parseCOP(editPriceInput))}</div>
+                </div>
+                <div>
+                  <label className="text-xs text-gray-500">Precio mayorista (COP)</label>
+                  <input type="text" value={editWholesalePriceInput} onChange={(e) => setEditWholesalePriceInput(e.target.value)} className="w-full p-2 border rounded" placeholder="Opcional" />
+                  <div className="text-xs text-gray-400 mt-1">Se usa únicamente en el enlace mayorista.</div>
                 </div>
                 <div>
                   <label className="text-xs text-gray-500">Código / SKU</label>

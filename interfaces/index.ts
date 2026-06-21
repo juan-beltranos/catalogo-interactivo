@@ -5,8 +5,9 @@ export interface Product {
   name: string;
   sku?: string;
   description?: string;
-  price: number;
-  categoryId: string;
+    price: number;
+    wholesalePrice?: number | null;
+    categoryId: string;
   images: ImageItem[];
   options: ProductOption[];
   variants: Variant[];

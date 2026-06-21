@@ -14,8 +14,10 @@ import {
   writeBatch,
 } from "firebase/firestore";
 import { db } from "../../lib/firebase";
+import { getStoreForOwner } from "@/lib/storeLookup";
 import { Category } from "@/interfaces";
 import { useAuth } from "@/context/AuthContext";
+import Paginator from "@/components/catalog/Paginator";
 
 import {
   DndContext,
@@ -44,6 +46,8 @@ type SortableCategoryRowProps = {
   onEdit: (cat: Category) => void;
   onDelete: (id: string) => void;
 };
+
+const PAGE_SIZE = 20;
 
 const SortableCategoryRow: React.FC<SortableCategoryRowProps> = ({
   cat,
@@ -157,6 +161,7 @@ const CategoriesView: React.FC = () => {
   const [error, setError] = useState("");
 
   const [editingCategory, setEditingCategory] = useState<Category | null>(null);
+  const [page, setPage] = useState(1);
 
   const sensors = useSensors(
     useSensor(PointerSensor, {
@@ -180,14 +185,12 @@ const CategoriesView: React.FC = () => {
         setLoading(true);
         setError("");
 
-        const q = query(collection(db, "stores"), where("ownerUid", "==", user.uid));
-        const snap = await getDocs(q);
+        const store = await getStoreForOwner(user.uid);
 
-        if (!snap.empty) {
-          const storeDoc = snap.docs[0];
-          const storeData = storeDoc.data() as any;
+        if (store) {
+          const storeData = store.data;
 
-          setStoreId(storeDoc.id);
+          setStoreId(store.id);
           setStoreSlug(storeData.slug || "");
         } else {
           setStoreId(null);
@@ -304,6 +307,13 @@ const CategoriesView: React.FC = () => {
 
     return () => unsubscribe();
   }, [categoriesRef]);
+
+  const totalPages = Math.max(1, Math.ceil(categories.length / PAGE_SIZE));
+  const paginatedCategories = useMemo(
+    () => categories.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE),
+    [categories, page],
+  );
+  useEffect(() => { if (page > totalPages) setPage(totalPages); }, [page, totalPages]);
 
   const handleDragEnd = async (event: DragEndEvent) => {
     const { active, over } = event;
@@ -483,11 +493,11 @@ const CategoriesView: React.FC = () => {
                     onDragEnd={handleDragEnd}
                   >
                     <SortableContext
-                      items={categories.map((cat) => cat.id)}
+                      items={paginatedCategories.map((cat) => cat.id)}
                       strategy={verticalListSortingStrategy}
                     >
                       <tbody className="divide-y divide-gray-100">
-                        {categories.map((cat) => (
+                        {paginatedCategories.map((cat) => (
                           <SortableCategoryRow
                             key={cat.id}
                             cat={cat}
@@ -511,6 +521,15 @@ const CategoriesView: React.FC = () => {
                   </DndContext>
                 </table>
               </div>
+              {categories.length > PAGE_SIZE ? (
+                <Paginator
+                  page={page}
+                  hasPrev={page > 1}
+                  hasNext={page < totalPages}
+                  onPrev={() => setPage((current) => Math.max(1, current - 1))}
+                  onNext={() => setPage((current) => Math.min(totalPages, current + 1))}
+                />
+              ) : null}
             </div>
           )}
         </div>

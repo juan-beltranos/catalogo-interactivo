@@ -17,6 +17,7 @@ import {
   limitToLast,
 } from "firebase/firestore";
 import { db } from "../../lib/firebase";
+import { getStoreForOwner } from "@/lib/storeLookup";
 import { useAuth } from "../../context/AuthContext";
 import { Order, OrderItem, OrderStatus } from "@/types";
 import { formatCOP, formatDate, waTo } from "@/helpers";
@@ -81,13 +82,8 @@ const OrdersView: React.FC = () => {
     if (!user) return;
 
     const fetchStore = async () => {
-      const qStore = query(
-        collection(db, "stores"),
-        where("ownerUid", "==", user.uid),
-        limit(1),
-      );
-      const snap = await getDocs(qStore);
-      if (!snap.empty) setStoreId(snap.docs[0].id);
+      const store = await getStoreForOwner(user.uid);
+      if (store) setStoreId(store.id);
       else {
         console.error("No se encontró tienda para este usuario");
         setStoreId(null);

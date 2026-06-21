@@ -9,10 +9,13 @@ import {
   limit,
 } from "firebase/firestore";
 import { db } from "../../lib/firebase";
+import { getStoreForOwner } from "@/lib/storeLookup";
 import { useAuth } from "../../context/AuthContext";
 import { formatCOP, formatDate, normalizePhone } from "@/helpers";
 import { Client, Order, OrderItem, OrderStatus } from "@/types";
+import Paginator from "@/components/catalog/Paginator";
 
+const PAGE_SIZE = 20;
 
 
 const CustomersView: React.FC = () => {
@@ -28,19 +31,15 @@ const CustomersView: React.FC = () => {
   const [loadingOrders, setLoadingOrders] = useState(false);
 
   const [search, setSearch] = useState("");
+  const [page, setPage] = useState(1);
 
   // 1) obtener storeId por ownerUid
   useEffect(() => {
     if (!user) return;
 
     const fetchStore = async () => {
-      const qStore = query(
-        collection(db, "stores"),
-        where("ownerUid", "==", user.uid),
-        limit(1)
-      );
-      const snap = await getDocs(qStore);
-      if (!snap.empty) setStoreId(snap.docs[0].id);
+      const store = await getStoreForOwner(user.uid);
+      if (store) setStoreId(store.id);
       else {
         console.error("No se encontró tienda para este usuario");
         setStoreId(null);
@@ -114,6 +113,14 @@ const CustomersView: React.FC = () => {
       return name.includes(s) || phone.includes(normalizePhone(s));
     });
   }, [clients, search]);
+  const totalPages = Math.max(1, Math.ceil(filteredClients.length / PAGE_SIZE));
+  const paginatedClients = useMemo(
+    () => filteredClients.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE),
+    [filteredClients, page],
+  );
+
+  useEffect(() => setPage(1), [search]);
+  useEffect(() => { if (page > totalPages) setPage(totalPages); }, [page, totalPages]);
 
   const handleViewDetails = async (client: Client) => {
     if (!storeId) return;
@@ -287,7 +294,7 @@ const CustomersView: React.FC = () => {
               </thead>
 
               <tbody className="divide-y divide-gray-100">
-                {filteredClients.map((c) => (
+                {paginatedClients.map((c) => (
                   <tr key={c.id} className="hover:bg-gray-50 transition-colors">
                     <td className="px-6 py-4">
                       <div className="flex items-center gap-3">
@@ -349,6 +356,15 @@ const CustomersView: React.FC = () => {
             </table>
           </div>
         )}
+        {!loading && filteredClients.length > PAGE_SIZE ? (
+          <Paginator
+            page={page}
+            hasPrev={page > 1}
+            hasNext={page < totalPages}
+            onPrev={() => setPage((current) => Math.max(1, current - 1))}
+            onNext={() => setPage((current) => Math.min(totalPages, current + 1))}
+          />
+        ) : null}
       </div>
 
       {/* Drawer */}

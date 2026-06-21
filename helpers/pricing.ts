@@ -37,15 +37,24 @@ export const discountBadgeText = (discount: Discount) => {
 };
 
 // Precio base (sin descuento) según variante o producto
-export const getBaseUnitPrice = (p: Product, v?: Variant) =>
-    v ? Number(v.price || 0) : Number(p.price || 0);
+export const getBaseUnitPrice = (p: Product, v?: Variant, isWholesale = false) => {
+    const wholesalePrice = Number(p.wholesalePrice || 0);
+    if (isWholesale && wholesalePrice > 0) return wholesalePrice;
+    return v ? Number(v.price || 0) : Number(p.price || 0);
+};
 
 // Precio final (con descuento) según variante o producto
-export const getFinalUnitPrice = (p: Product, v?: Variant) =>
-    applyDiscount(getBaseUnitPrice(p, v), (p as any).discount);
+export const getFinalUnitPrice = (p: Product, v?: Variant, isWholesale = false) =>
+    isWholesale && Number(p.wholesalePrice || 0) > 0
+        ? getBaseUnitPrice(p, v, true)
+        : applyDiscount(getBaseUnitPrice(p, v), (p as any).discount);
 
 // Para cards: si tiene variantes, muestra "Desde ..." ya con descuento aplicado
-export const getProductCardPrice = (p: Product) => {
+export const getProductCardPrice = (p: Product, isWholesale = false) => {
+    const wholesalePrice = Number(p.wholesalePrice || 0);
+    if (isWholesale && wholesalePrice > 0) {
+        return { hasVariants: false, base: wholesalePrice, final: wholesalePrice };
+    }
     const vars = (p.variants || []) as Variant[];
     const hasVars = vars.length > 0;
 

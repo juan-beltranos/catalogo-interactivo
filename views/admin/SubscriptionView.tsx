@@ -10,6 +10,7 @@ import {
     where,
 } from 'firebase/firestore';
 import { db } from '../../lib/firebase';
+import { getStoreForOwner, invalidateStoreForOwner } from "@/lib/storeLookup";
 import { useAuth } from '../../context/AuthContext';
 
 type FirestoreTimestampLike = {
@@ -124,27 +125,20 @@ const SubscriptionView: React.FC = () => {
                     return;
                 }
 
-                const qStore = query(
-                    collection(db, 'stores'),
-                    where('ownerUid', '==', user.uid),
-                    limit(1)
-                );
-
-                const snap = await getDocs(qStore);
+                const storeResult = await getStoreForOwner(user.uid);
 
                 if (!isMounted) return;
 
-                if (snap.empty) {
+                if (!storeResult) {
                     setStoreInfo(null);
                     setLoading(false);
                     return;
                 }
 
-                const storeDoc = snap.docs[0];
-                const data = storeDoc.data() as any;
+                const data = storeResult.data;
 
                 const loadedStore: StoreInfo = {
-                    id: storeDoc.id,
+                    id: storeResult.id,
                     name: typeof data.name === 'string' ? data.name : '',
                     slug: typeof data.slug === 'string' ? data.slug : '',
                     hasActiveSubscription: data.hasActiveSubscription === true,
@@ -180,12 +174,13 @@ const SubscriptionView: React.FC = () => {
                     loadedStore.freeTrialStatus !== 'expired' &&
                     loadedStore.subscriptionStatus !== 'trial_expired'
                 ) {
-                    await updateDoc(doc(db, 'stores', storeDoc.id), {
+                    await updateDoc(doc(db, 'stores', storeResult.id), {
                         hasActiveSubscription: false,
                         subscriptionStatus: 'trial_expired',
                         freeTrialStatus: 'expired',
                         updatedAt: serverTimestamp(),
                     });
+                    invalidateStoreForOwner(user.uid);
 
                     loadedStore.hasActiveSubscription = false;
                     loadedStore.subscriptionStatus = 'trial_expired';

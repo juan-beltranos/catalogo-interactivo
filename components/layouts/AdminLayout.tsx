@@ -13,6 +13,7 @@ import {
 } from 'firebase/firestore';
 
 import { auth, db } from '../../lib/firebase';
+import { getStoreForOwner, invalidateStoreForOwner } from "@/lib/storeLookup";
 import { useAuth } from '../../context/AuthContext';
 import Sidebar from '../admin/Sidebar';
 
@@ -106,27 +107,20 @@ const AdminLayout: React.FC = () => {
 
         setLoadingStore(true);
 
-        const qStore = query(
-          collection(db, 'stores'),
-          where('ownerUid', '==', user.uid),
-          limit(1)
-        );
-
-        const snap = await getDocs(qStore);
+        const storeResult = await getStoreForOwner(user.uid);
 
         if (!isMounted) return;
 
-        if (snap.empty) {
+        if (!storeResult) {
           setStoreInfo(null);
           setLoadingStore(false);
           return;
         }
 
-        const storeDoc = snap.docs[0];
-        const data = storeDoc.data() as any;
+        const data = storeResult.data;
 
         const loadedStore: StoreInfo = {
-          id: storeDoc.id,
+          id: storeResult.id,
           slug: typeof data.slug === 'string' ? data.slug : '',
           name: typeof data.name === 'string' ? data.name : '',
           hasActiveSubscription: data.hasActiveSubscription === true,
@@ -178,12 +172,13 @@ const AdminLayout: React.FC = () => {
           loadedStore.freeTrialStatus !== 'expired' &&
           loadedStore.subscriptionStatus !== 'trial_expired'
         ) {
-          await updateDoc(doc(db, 'stores', storeDoc.id), {
+          await updateDoc(doc(db, 'stores', storeResult.id), {
             hasActiveSubscription: false,
             subscriptionStatus: 'trial_expired',
             freeTrialStatus: 'expired',
             updatedAt: serverTimestamp(),
           });
+          invalidateStoreForOwner(user.uid);
 
           loadedStore.hasActiveSubscription = false;
           loadedStore.subscriptionStatus = 'trial_expired';
@@ -194,11 +189,12 @@ const AdminLayout: React.FC = () => {
           subscriptionExpired &&
           loadedStore.subscriptionStatus !== 'expired'
         ) {
-          await updateDoc(doc(db, 'stores', storeDoc.id), {
+          await updateDoc(doc(db, 'stores', storeResult.id), {
             hasActiveSubscription: false,
             subscriptionStatus: 'expired',
             updatedAt: serverTimestamp(),
           });
+          invalidateStoreForOwner(user.uid);
 
           loadedStore.hasActiveSubscription = false;
           loadedStore.subscriptionStatus = 'expired';

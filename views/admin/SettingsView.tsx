@@ -9,6 +9,7 @@ import {
     where,
 } from "firebase/firestore";
 import { db, storage } from "../../lib/firebase";
+import { getStoreForOwner, invalidateStoreForOwner } from "@/lib/storeLookup";
 import { useAuth } from "../../context/AuthContext";
 import { Store } from "@/interfaces";
 import { slugify } from "@/helpers";
@@ -22,6 +23,7 @@ const SettingsView: React.FC = () => {
     const [loading, setLoading] = useState(true);
     const [saving, setSaving] = useState(false);
     const [error, setError] = useState("");
+    const [sharedCatalog, setSharedCatalog] = useState<"public" | "wholesale" | null>(null);
 
     // form — campos originales
     const [name, setName] = useState("");
@@ -58,22 +60,16 @@ const SettingsView: React.FC = () => {
 
         const load = async () => {
             setLoading(true);
-            const q = query(
-                collection(db, "stores"),
-                where("ownerUid", "==", user.uid),
-                limit(1)
-            );
-            const snap = await getDocs(q);
-            if (snap.empty) {
+            const storeResult = await getStoreForOwner(user.uid);
+            if (!storeResult) {
                 setLoading(false);
                 return;
             }
 
-            const d = snap.docs[0];
-            const data = d.data() as any;
+            const data = storeResult.data;
 
             const s: Store = {
-                id: d.id,
+                id: storeResult.id,
                 name: data.name,
                 slug: data.slug,
                 address: data.description ?? "",
@@ -175,6 +171,32 @@ const SettingsView: React.FC = () => {
         if (!store?.slug) return "";
         return `${window.location.origin}/#/${store.slug}`;
     }, [store?.slug]);
+    const wholesaleCatalogUrl = useMemo(
+        () => catalogUrl ? `${catalogUrl}?tipo=mayorista` : "",
+        [catalogUrl]
+    );
+
+    const shareCatalogLink = async (type: "public" | "wholesale") => {
+        const url = type === "wholesale" ? wholesaleCatalogUrl : catalogUrl;
+        const title = type === "wholesale" ? "Catálogo mayorista" : "Catálogo público";
+        if (!url) return;
+
+        try {
+            if (navigator.share) {
+                await navigator.share({ title, text: `Te comparto el ${title.toLowerCase()}.`, url });
+            } else {
+                await navigator.clipboard.writeText(url);
+                setSharedCatalog(type);
+                window.setTimeout(() => setSharedCatalog(null), 2500);
+            }
+        } catch (err: any) {
+            if (err?.name !== "AbortError") {
+                await navigator.clipboard.writeText(url);
+                setSharedCatalog(type);
+                window.setTimeout(() => setSharedCatalog(null), 2500);
+            }
+        }
+    };
 
     // --- Toggle método de envío ---
     const toggleShippingMethod = (method: string) => {
@@ -245,6 +267,7 @@ const SettingsView: React.FC = () => {
                 ...bannerPayload,
                 updatedAt: new Date(),
             });
+            invalidateStoreForOwner(user?.uid);
 
             alert("Configuración guardada ✅");
             setStore({
@@ -445,7 +468,39 @@ const SettingsView: React.FC = () => {
 
             {/* ── Catálogo público ── */}
             <div className="bg-white border rounded-xl p-6 space-y-4">
-                <h2 className="font-bold text-gray-900">Catálogo público</h2>
+                <div>
+                    <h2 className="font-bold text-gray-900">Comparte tus catálogos</h2>
+                    <p className="mt-1 text-sm text-gray-500">Envía el enlace público o el enlace con precios mayoristas según tu cliente.</p>
+                </div>
+
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                    <button
+                        type="button"
+                        onClick={() => shareCatalogLink("public")}
+                        className="w-full rounded-xl border border-gray-200 bg-white px-4 py-3 text-left font-semibold text-gray-800 shadow-sm transition hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-gray-300"
+                    >
+                        <span className="flex items-center gap-3">
+                            <span className="flex h-10 w-10 items-center justify-center rounded-lg bg-gray-100 text-gray-600"><i className="fa-solid fa-store" /></span>
+                            <span><span className="block">Compartir catálogo público</span><span className="mt-0.5 block text-xs font-normal text-gray-500">Precios para consumidor final</span></span>
+                        </span>
+                    </button>
+                    <button
+                        type="button"
+                        onClick={() => shareCatalogLink("wholesale")}
+                        className="w-full rounded-xl border border-indigo-200 bg-indigo-50 px-4 py-3 text-left font-semibold text-indigo-900 shadow-sm transition hover:bg-indigo-100 focus:outline-none focus:ring-2 focus:ring-indigo-300"
+                    >
+                        <span className="flex items-center gap-3">
+                            <span className="flex h-10 w-10 items-center justify-center rounded-lg bg-indigo-100 text-indigo-600"><i className="fa-solid fa-tags" /></span>
+                            <span><span className="block">Compartir catálogo mayorista</span><span className="mt-0.5 block text-xs font-normal text-indigo-700">Precios configurados para mayoristas</span></span>
+                        </span>
+                    </button>
+                </div>
+
+                {sharedCatalog ? (
+                    <div className="rounded-lg bg-green-50 px-3 py-2 text-sm font-medium text-green-700">
+                        Link {sharedCatalog === "public" ? "público" : "mayorista"} copiado al portapapeles.
+                    </div>
+                ) : null}
 
                 <div className="text-sm text-gray-600 break-all">{catalogUrl}</div>
 
@@ -462,6 +517,18 @@ const SettingsView: React.FC = () => {
                     >
                         Copiar link
                     </button>
+                </div>
+
+                <div className="rounded-xl border border-indigo-200 bg-indigo-50/60 p-4">
+                    <div className="flex items-center gap-2 font-bold text-indigo-900">
+                        <i className="fa-solid fa-tags text-indigo-600" /> Catálogo mayorista
+                    </div>
+                    <p className="mt-1 text-xs text-indigo-700">Muestra el precio mayorista de los productos que lo tengan configurado.</p>
+                    <div className="mt-2 text-xs text-indigo-700 break-all">{wholesaleCatalogUrl}</div>
+                    <div className="mt-3 flex gap-2">
+                        <button onClick={() => window.open(wholesaleCatalogUrl, "_blank")} className="px-3 py-2 border border-indigo-200 bg-white rounded-lg text-sm font-semibold text-indigo-700">Abrir mayorista</button>
+                        <button onClick={() => navigator.clipboard.writeText(wholesaleCatalogUrl)} className="px-3 py-2 bg-indigo-600 text-white rounded-lg text-sm font-semibold">Copiar link mayorista</button>
+                    </div>
                 </div>
 
                 <label className="flex items-center gap-3 mt-2">
