@@ -34,6 +34,7 @@ export type Product = {
     imageUrl?: string;
     images?: ImageItem[];
     variants?: Variant[];
+    allowsCashOnDelivery?: boolean;
 };
 
 export type Category = { id: string; name: string; order: number };
@@ -46,6 +47,7 @@ export type CartItem = {
     unitPrice: number; // COP int
     qty: number;
     imageUrl?: string;
+    allowsCashOnDelivery?: boolean;
     originalUnitPrice?: number; // BASE sin descuento (opcional)
     hasDiscount?: boolean;
     sku?: string;

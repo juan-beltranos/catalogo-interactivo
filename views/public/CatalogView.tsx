@@ -335,6 +335,14 @@ const CatalogView: React.FC = () => {
 
   // ── Configuración de envío derivada del store ──
   const shippingConfig = useMemo(() => getShippingConfig(store), [store]);
+  const cashOnDeliveryAvailable = useMemo(
+    () => cart.every((item) => item.allowsCashOnDelivery !== false),
+    [cart],
+  );
+  const availableShippingMethods = useMemo(
+    () => shippingConfig.methods.filter((method) => method !== "cod" || cashOnDeliveryAvailable),
+    [shippingConfig.methods, cashOnDeliveryAvailable],
+  );
 
   // Auto-seleccionar primer método si solo hay uno
   useEffect(() => {
@@ -342,12 +350,13 @@ const CatalogView: React.FC = () => {
       setSelectedShipping(null);
       return;
     }
-    if (shippingConfig.methods.length === 1) {
-      setSelectedShipping(shippingConfig.methods[0] as ShippingMethod);
-    } else {
-      setSelectedShipping(null);
-    }
-  }, [shippingConfig.enabled, shippingConfig.methods.join(",")]);
+    setSelectedShipping((current) => {
+      if (current && availableShippingMethods.includes(current)) return current;
+      return availableShippingMethods.length === 1
+        ? availableShippingMethods[0] as ShippingMethod
+        : null;
+    });
+  }, [shippingConfig.enabled, availableShippingMethods]);
 
   // Costo de envío según selección
   const shippingCost = useMemo(() => {
@@ -681,6 +690,7 @@ const CatalogView: React.FC = () => {
       hasDiscount: hasValidDiscount((prod as any).discount),
       qty: 1,
       imageUrl: getProductMainImage(prod),
+      allowsCashOnDelivery: prod.allowsCashOnDelivery ?? true,
     };
     setCart((prev) => {
       const idx = prev.findIndex(
@@ -734,8 +744,11 @@ const CatalogView: React.FC = () => {
       return alert("Esta tienda no tiene WhatsApp configurado.");
 
     // Validar método de envío si está habilitado
-    if (shippingConfig.enabled && shippingConfig.methods.length > 1 && !selectedShipping) {
+    if (shippingConfig.enabled && availableShippingMethods.length > 1 && !selectedShipping) {
       return alert("Selecciona un método de envío.");
+    }
+    if (selectedShipping === "cod" && !cashOnDeliveryAvailable) {
+      return alert("Uno o más productos no permiten pago contra entrega.");
     }
 
     setPlacingOrder(true);
@@ -783,6 +796,9 @@ const CatalogView: React.FC = () => {
         const updates: { ref: any; data: any }[] = [];
 
         for (const { item, ref, data } of productSnaps) {
+          if (selectedShipping === "cod" && data.allowsCashOnDelivery === false) {
+            throw new Error(`El producto ${item.productName} no permite pago contra entrega`);
+          }
           if (item.variantId) {
             const variants = data.variants || [];
             const i = variants.findIndex((v: any) => v.id === item.variantId);
@@ -846,10 +862,11 @@ const CatalogView: React.FC = () => {
           },
           notes: customerNotes.trim() || "",
           items,
-          subtotal,
-          shippingMethod: selectedShipping ?? null,
-          shippingCost,
-          total: orderTotal,
+        subtotal,
+        shippingMethod: selectedShipping ?? null,
+        shippingCost,
+        cashOnDeliveryEligible: cashOnDeliveryAvailable,
+        total: orderTotal,
           createdAt: serverTimestamp(),
           updatedAt: serverTimestamp(),
         });
@@ -878,6 +895,8 @@ const CatalogView: React.FC = () => {
       if (shippingConfig.enabled && selectedShipping) {
         const label = SHIPPING_LABELS[selectedShipping].label;
         lines.push(`🚚 Envío (${label}): ${shippingCost === 0 ? "Gratis" : formatCOP(shippingCost)}`);
+      } else if (shippingConfig.enabled && !cashOnDeliveryAvailable && shippingConfig.methods.includes("cod")) {
+        lines.push("⚠️ Pago contra entrega: no disponible para todos los productos. Coordinar pago y envío.");
       }
       lines.push(`💰 *Total:* ${formatCOP(orderTotal)}`);
 
@@ -1644,7 +1663,7 @@ const CatalogView: React.FC = () => {
               </div>
 
               {/* ── Método de envío (NUEVO) ── */}
-              {shippingConfig.enabled && shippingConfig.methods.length > 0 && (
+              {shippingConfig.enabled && availableShippingMethods.length > 0 && (
                 <div className="space-y-3">
                   <div className="text-sm font-extrabold text-gray-900 flex items-center gap-2">
                     <i className="fa-solid fa-truck text-gray-400" />
@@ -1652,7 +1671,7 @@ const CatalogView: React.FC = () => {
                   </div>
 
                   <div className="grid grid-cols-1 gap-2">
-                    {shippingConfig.methods.map((method) => {
+                    {availableShippingMethods.map((method) => {
                       const meta = SHIPPING_LABELS[method as ShippingMethod];
                       const cost = method === "cod" ? shippingConfig.costCOD : shippingConfig.costCarrier;
                       const isSelected = selectedShipping === method;
@@ -1703,6 +1722,13 @@ const CatalogView: React.FC = () => {
                   </div>
 
                   {/* Nota de envío */}
+                  {!cashOnDeliveryAvailable && shippingConfig.methods.includes("cod") ? (
+                    <div className="flex items-start gap-2 rounded-xl border border-amber-200 bg-amber-50 px-3 py-2.5">
+                      <i className="fa-solid fa-circle-info text-amber-500 text-sm mt-0.5 shrink-0" />
+                      <p className="text-xs text-amber-800">El pago contra entrega no está disponible para uno o más productos del carrito.</p>
+                    </div>
+                  ) : null}
+
                   {shippingConfig.note ? (
                     <div className="flex items-start gap-2 bg-amber-50 border border-amber-200 rounded-xl px-3 py-2.5">
                       <i className="fa-solid fa-circle-info text-amber-500 text-sm mt-0.5 shrink-0" />
@@ -1713,6 +1739,13 @@ const CatalogView: React.FC = () => {
               )}
 
               {/* Resumen de totales */}
+              {shippingConfig.enabled && availableShippingMethods.length === 0 ? (
+                <div className="flex items-start gap-2 rounded-xl border border-amber-200 bg-amber-50 px-3 py-2.5">
+                  <i className="fa-solid fa-circle-info text-amber-500 text-sm mt-0.5 shrink-0" />
+                  <p className="text-xs text-amber-800">Algunos productos no permiten pago contra entrega. Puedes enviar el pedido y la tienda coordinará contigo el pago y el envío por WhatsApp.</p>
+                </div>
+              ) : null}
+
               {cart.length > 0 && (
                 <div className="border-t pt-4 space-y-2">
                   <div className="flex items-center justify-between text-sm text-gray-500">

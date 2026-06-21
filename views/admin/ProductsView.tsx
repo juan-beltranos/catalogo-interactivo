@@ -229,6 +229,7 @@ const ProductsView: React.FC = () => {
   const [discountType, setDiscountType] = useState<"percent" | "amount">("percent");
   const [discountValueInput, setDiscountValueInput] = useState("");
   const [isActive, setIsActive] = useState(true);
+  const [allowsCashOnDelivery, setAllowsCashOnDelivery] = useState(true);
 
   const [createVariants, setCreateVariants] = useState<Variant[]>([]);
   const [useVariants, setUseVariants] = useState(false);
@@ -308,6 +309,7 @@ const ProductsView: React.FC = () => {
         options: (data.options ?? []) as ProductOption[],
         variants: (data.variants ?? []) as Variant[],
         isActive: data.isActive ?? true,
+        allowsCashOnDelivery: data.allowsCashOnDelivery ?? true,
         order: data.order ?? null,
       };
     },
@@ -849,7 +851,7 @@ const ProductsView: React.FC = () => {
     if (fileInputRef.current) fileInputRef.current.value = "";
     setName(""); setDescription(""); setPriceInput(""); setCategoryId(""); setSku("");
     setHasDiscount(false); setDiscountType("percent"); setDiscountValueInput("");
-    setImageFiles([]); setVideoFiles([]); setUseVariants(false); setCreateVariants([]); setIsActive(true);
+    setImageFiles([]); setVideoFiles([]); setUseVariants(false); setCreateVariants([]); setIsActive(true); setAllowsCashOnDelivery(true);
   };
 
   // ── loadPage: ordena por `order` ASC si existe, sino por `createdAt` DESC ──
@@ -1037,7 +1039,7 @@ const ProductsView: React.FC = () => {
 
       await addDoc(prodsRef, {
         name: cleanName, sku: cleanSku, description: description.trim(), price: bp, discount,
-        categoryId, images, videos, options: [], variants, isActive,
+        categoryId, images, videos, options: [], variants, isActive, allowsCashOnDelivery,
         order: newOrder,
         createdAt: serverTimestamp(), updatedAt: serverTimestamp(),
       });
@@ -1101,7 +1103,9 @@ const ProductsView: React.FC = () => {
         price: bp, discount, categoryId: editingProduct.categoryId, options: [],
         variants: editUseVariants ? (editingProduct.variants ?? []) : [],
         images: editingProduct.images ?? [], videos: editingProduct.videos ?? [],
-        isActive: editingProduct.isActive ?? true, updatedAt: serverTimestamp(),
+        isActive: editingProduct.isActive ?? true,
+        allowsCashOnDelivery: editingProduct.allowsCashOnDelivery ?? true,
+        updatedAt: serverTimestamp(),
       });
 
       await loadFirstPage();
@@ -1369,6 +1373,16 @@ const ProductsView: React.FC = () => {
                 </div>
               </div>
               <div className="mt-2 text-xs text-gray-400">{isActive ? "Este producto se mostrará en el catálogo." : "Este producto quedará oculto en el catálogo."}</div>
+            </div>
+
+            <div className="border rounded-lg p-3">
+              <div className="flex items-center justify-between gap-3">
+                <div>
+                  <label htmlFor="allowsCashOnDelivery" className="text-sm font-medium text-gray-700">Envío contra entrega</label>
+                  <div className="mt-1 text-xs text-gray-400">Permite enviar y pagar este producto contra entrega.</div>
+                </div>
+                <input id="allowsCashOnDelivery" type="checkbox" checked={allowsCashOnDelivery} onChange={(e) => setAllowsCashOnDelivery(e.target.checked)} />
+              </div>
             </div>
 
             <select value={categoryId} onChange={(e) => setCategoryId(e.target.value)} className="w-full p-2 border rounded" required>
@@ -1694,6 +1708,15 @@ const ProductsView: React.FC = () => {
                   <div className="text-xs text-gray-400">{(editingProduct.isActive ?? true) ? "Este producto se mostrará en el catálogo." : "Este producto quedará oculto."}</div>
                 </div>
                 <div className="md:col-span-2">
+                  <div className="border rounded-lg p-4 space-y-2 mb-4">
+                    <div className="flex items-center justify-between gap-3">
+                      <div>
+                        <label htmlFor="editAllowsCashOnDelivery" className="text-sm font-medium text-gray-700">Envío contra entrega</label>
+                        <div className="mt-1 text-xs text-gray-400">Permite enviar y pagar este producto contra entrega.</div>
+                      </div>
+                      <input id="editAllowsCashOnDelivery" type="checkbox" checked={editingProduct.allowsCashOnDelivery ?? true} onChange={(e) => setEditingProduct({ ...editingProduct, allowsCashOnDelivery: e.target.checked })} />
+                    </div>
+                  </div>
                   <label className="text-xs text-gray-500">Categoría</label>
                   <select value={editingProduct.categoryId} onChange={(e) => setEditingProduct({ ...editingProduct, categoryId: e.target.value })} className="w-full p-2 border rounded">
                     <option value="">Categoría</option>
