@@ -16,6 +16,8 @@ import { AuthProvider } from './context/AuthContext';
 import RegisterView from './views/admin/RegisterView';
 import SettingsView from './views/admin/SettingsView';
 import SubscriptionView from './views/admin/SubscriptionView';
+import StoresView from './views/superadmin/StoresView';
+import SuperAdminRoute from './components/auth/SuperAdminRoute';
 
 const App: React.FC = () => {
   return (
@@ -30,6 +32,8 @@ const App: React.FC = () => {
           {/* Admin Login */}
           <Route path="/admin/login" element={<LoginView />} />
           <Route path="/admin/register" element={<RegisterView />} />
+
+          <Route path="/system/stores" element={<SuperAdminRoute><StoresView /></SuperAdminRoute>} />
 
           {/* Protected Admin Routes */}
           <Route path="/admin" element={<ProtectedRoute />}>

@@ -184,6 +184,7 @@ const RegisterView: React.FC = () => {
                 whatsapp: cleanWhatsapp,
                 address: address.trim() || "",
                 ownerUid: cred.user.uid,
+                ownerEmail: cleanEmail,
                 isActive: true,
 
                 // Fuente del registro
