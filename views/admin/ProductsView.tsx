@@ -213,6 +213,7 @@ const ProductsView: React.FC = () => {
   // ── Drag & drop state ────────────────────────────────────────────────────
   const [savingOrder, setSavingOrder] = useState(false);
   const [exportingExcel, setExportingExcel] = useState(false);
+  const [deletingAllProducts, setDeletingAllProducts] = useState(false);
 
   const importExcelRef = useRef<HTMLInputElement | null>(null);
   const [importingExcel, setImportingExcel] = useState(false);
@@ -1142,6 +1143,47 @@ const ProductsView: React.FC = () => {
     }
   };
 
+  const handleDeleteAllProducts = async () => {
+    if (!storeId || !prodsRef || deletingAllProducts) return;
+    if (!window.confirm("¿Eliminar todos los productos de esta tienda? Esta acción no se puede deshacer.")) return;
+
+    setDeletingAllProducts(true);
+    try {
+      const snapshot = await getDocs(prodsRef);
+      if (snapshot.empty) {
+        alert("Esta tienda no tiene productos para eliminar.");
+        return;
+      }
+
+      const batchSize = 450;
+      for (let start = 0; start < snapshot.docs.length; start += batchSize) {
+        const batch = writeBatch(db);
+        snapshot.docs
+          .slice(start, start + batchSize)
+          .forEach((productDoc) => batch.delete(productDoc.ref));
+        await batch.commit();
+      }
+
+      pageCache = null;
+      allProductsCache.delete(storeId);
+      setProducts([]);
+      setAllProducts([]);
+      setAllLoaded(false);
+      setSearchResults([]);
+      setHasNext(false);
+      setPageFirstDoc(null);
+      setPageLastDoc(null);
+      setHistory([]);
+      setPage(1);
+      alert(`Se eliminaron ${snapshot.docs.length} producto(s).`);
+    } catch (err) {
+      console.error(err);
+      alert("No se pudieron eliminar todos los productos. Intenta nuevamente.");
+    } finally {
+      setDeletingAllProducts(false);
+    }
+  };
+
   const openEdit = (p: Product) => {
     setEditingProduct(p);
     setEditPriceInput(String(p.price));
@@ -1557,7 +1599,7 @@ const ProductsView: React.FC = () => {
                 <button
                   type="button"
                   onClick={() => importExcelRef.current?.click()}
-                  disabled={importingExcel || exportingExcel}
+                  disabled={importingExcel || exportingExcel || deletingAllProducts}
                   className="px-3 py-2 rounded text-sm font-semibold bg-indigo-600 text-white hover:bg-indigo-700 disabled:opacity-50 whitespace-nowrap"
                 >
                   {importingExcel ? (
@@ -1569,6 +1611,25 @@ const ProductsView: React.FC = () => {
                     <>
                       <i className="fa-solid fa-file-import mr-2" />
                       Importar Excel
+                    </>
+                  )}
+                </button>
+                <button
+                  type="button"
+                  onClick={handleDeleteAllProducts}
+                  disabled={deletingAllProducts}
+                  className="px-3 py-2 rounded text-sm font-semibold bg-red-600 text-white hover:bg-red-700 disabled:opacity-50 whitespace-nowrap"
+                  title="Eliminar todos los productos de esta tienda"
+                >
+                  {deletingAllProducts ? (
+                    <>
+                      <i className="fa-solid fa-spinner fa-spin mr-2" />
+                      Eliminando
+                    </>
+                  ) : (
+                    <>
+                      <i className="fa-solid fa-trash-can mr-2" />
+                      Eliminar todos
                     </>
                   )}
                 </button>
