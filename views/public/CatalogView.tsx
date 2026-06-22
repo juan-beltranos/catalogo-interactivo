@@ -645,7 +645,9 @@ const CatalogView: React.FC = () => {
       })) as Product[];
       const newLastDoc = pageDocs[pageDocs.length - 1] ?? lastDoc;
       setProducts((prev) => {
-        const merged = sortProducts([...prev, ...newProducts]);
+        // Preserve the visible page order: products loaded on subsequent pages
+        // must be appended below the products already displayed.
+        const merged = [...prev, ...newProducts];
         setCategoryCache(store.id, activeCategoryId, {
           products: merged,
           lastDoc: newLastDoc,
