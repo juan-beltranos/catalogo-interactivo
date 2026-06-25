@@ -15,6 +15,8 @@ export interface Product {
   isActive?: Boolean;
   /** Si es false, este producto no puede pedirse con pago contra entrega. */
   allowsCashOnDelivery?: boolean;
+  order?: number | null;
+  createdAt?: any;
   discount?: {
     type: "percent" | "amount";
     value: number;
