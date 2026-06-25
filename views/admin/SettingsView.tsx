@@ -16,6 +16,54 @@ import { slugify } from "@/helpers";
 import { compressImage } from "@/helpers/imageCompression";
 import { ref, uploadBytes, getDownloadURL, deleteObject } from "firebase/storage";
 
+type CheckoutFieldType = "text" | "number" | "tel" | "email" | "textarea" | "select" | "date";
+
+type CheckoutFieldConfig = {
+    id: string;
+    label: string;
+    type: CheckoutFieldType;
+    required: boolean;
+    enabled: boolean;
+    placeholder?: string;
+    options?: string[];
+};
+
+const checkoutFieldTypes: { value: CheckoutFieldType; label: string }[] = [
+    { value: "text", label: "Texto corto" },
+    { value: "number", label: "Numero" },
+    { value: "tel", label: "Telefono" },
+    { value: "email", label: "Correo" },
+    { value: "textarea", label: "Texto largo" },
+    { value: "select", label: "Lista de opciones" },
+    { value: "date", label: "Fecha" },
+];
+
+const createCheckoutField = (): CheckoutFieldConfig => ({
+    id: `field_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+    label: "",
+    type: "text",
+    required: false,
+    enabled: true,
+    placeholder: "",
+    options: [],
+});
+
+const normalizeCheckoutFields = (fields: any[]): CheckoutFieldConfig[] => {
+    return (Array.isArray(fields) ? fields : [])
+        .map((field) => ({
+            id: String(field.id || `field_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`),
+            label: String(field.label || "").trim(),
+            type: checkoutFieldTypes.some((item) => item.value === field.type) ? field.type : "text",
+            required: field.required === true,
+            enabled: field.enabled !== false,
+            placeholder: String(field.placeholder || "").trim(),
+            options: Array.isArray(field.options)
+                ? field.options.map((option: any) => String(option).trim()).filter(Boolean)
+                : [],
+        }))
+        .filter((field) => field.label);
+};
+
 const SettingsView: React.FC = () => {
     const { user } = useAuth();
 
@@ -53,6 +101,7 @@ const SettingsView: React.FC = () => {
     const [shippingCostCarrier, setShippingCostCarrier] = useState("0");
     const [shippingNote, setShippingNote] = useState("");
     const [shippingHidePrices, setShippingHidePrices] = useState(false);
+    const [checkoutFields, setCheckoutFields] = useState<CheckoutFieldConfig[]>([]);
 
     // cargar tienda
     useEffect(() => {
@@ -104,6 +153,7 @@ const SettingsView: React.FC = () => {
             setShippingCostCarrier(String(data.shippingCostCarrier ?? 0));
             setShippingNote(data.shippingNote ?? "");
             setShippingHidePrices(data.shippingHidePrices ?? false);
+            setCheckoutFields(normalizeCheckoutFields(data.checkoutFields ?? []));
 
             setLoading(false);
         };
@@ -210,6 +260,28 @@ const SettingsView: React.FC = () => {
         });
     };
 
+    const updateCheckoutField = (id: string, patch: Partial<CheckoutFieldConfig>) => {
+        setCheckoutFields((prev) =>
+            prev.map((field) => {
+                if (field.id !== id) return field;
+                const next = { ...field, ...patch };
+                if (patch.type && patch.type !== "select") next.options = [];
+                return next;
+            }),
+        );
+    };
+
+    const moveCheckoutField = (index: number, direction: -1 | 1) => {
+        setCheckoutFields((prev) => {
+            const target = index + direction;
+            if (target < 0 || target >= prev.length) return prev;
+            const next = [...prev];
+            const [item] = next.splice(index, 1);
+            next.splice(target, 0, item);
+            return next;
+        });
+    };
+
     // --- Guardar ---
 
     const handleSave = async () => {
@@ -223,6 +295,16 @@ const SettingsView: React.FC = () => {
         const cleanSlug = slugify(slug);
         if (!cleanSlug) {
             setError("El slug no es válido.");
+            return;
+        }
+
+        if (checkoutFields.some((field) => !field.label.trim())) {
+            setError("Todos los campos personalizados deben tener nombre.");
+            return;
+        }
+
+        if (checkoutFields.some((field) => field.type === "select" && (field.options || []).filter(Boolean).length === 0)) {
+            setError("Los campos de lista deben tener al menos una opcion.");
             return;
         }
 
@@ -263,6 +345,7 @@ const SettingsView: React.FC = () => {
                 shippingCostCarrier: Number(shippingCostCarrier) || 0,
                 shippingNote: shippingNote.trim(),
                 shippingHidePrices,
+                checkoutFields: normalizeCheckoutFields(checkoutFields),
                 ...logoPayload,
                 ...bannerPayload,
                 updatedAt: new Date(),
@@ -277,6 +360,7 @@ const SettingsView: React.FC = () => {
                 description,
                 whatsapp,
                 isActive,
+                checkoutFields: normalizeCheckoutFields(checkoutFields),
                 ...logoPayload,
                 ...bannerPayload,
             } as any);
@@ -748,6 +832,161 @@ const SettingsView: React.FC = () => {
                     <div className="rounded-xl bg-gray-50 border border-dashed border-gray-200 p-4 text-center text-sm text-gray-400">
                         <i className="fa-solid fa-truck-fast text-2xl mb-2 block text-gray-300" />
                         Activa esta opción para que tus clientes puedan elegir cómo recibir su pedido.
+                    </div>
+                )}
+            </div>
+
+            <div className="bg-white border rounded-xl p-6 space-y-5">
+                <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+                    <div>
+                        <h2 className="font-bold text-gray-900">Formulario de compra</h2>
+                        <p className="text-xs text-gray-500 mt-0.5">
+                            Personaliza los datos que el cliente debe completar antes de enviar el pedido.
+                        </p>
+                    </div>
+                    <button
+                        type="button"
+                        onClick={() => setCheckoutFields((prev) => [...prev, createCheckoutField()])}
+                        className="inline-flex items-center justify-center gap-2 rounded-lg bg-indigo-600 px-4 py-2 text-sm font-bold text-white hover:bg-indigo-700"
+                    >
+                        <i className="fa-solid fa-plus text-xs" />
+                        Agregar campo
+                    </button>
+                </div>
+
+                {checkoutFields.length === 0 ? (
+                    <div className="rounded-xl border border-dashed border-gray-200 bg-gray-50 p-5 text-center">
+                        <i className="fa-regular fa-rectangle-list mb-2 block text-2xl text-gray-300" />
+                        <p className="text-sm font-semibold text-gray-500">No hay campos personalizados.</p>
+                        <p className="mt-1 text-xs text-gray-400">
+                            Nombre, telefono y direccion seguiran apareciendo por defecto.
+                        </p>
+                    </div>
+                ) : (
+                    <div className="space-y-4">
+                        {checkoutFields.map((field, index) => (
+                            <div key={field.id} className="rounded-xl border border-gray-200 p-4 space-y-4">
+                                <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                                    <div className="flex items-center gap-2">
+                                        <span className="flex h-8 w-8 items-center justify-center rounded-lg bg-gray-100 text-xs font-black text-gray-500">
+                                            {index + 1}
+                                        </span>
+                                        <div>
+                                            <p className="text-sm font-bold text-gray-900">
+                                                {field.label || "Campo sin nombre"}
+                                            </p>
+                                            <p className="text-xs text-gray-400">
+                                                {field.required ? "Obligatorio" : "Opcional"} · {field.enabled ? "Visible" : "Oculto"}
+                                            </p>
+                                        </div>
+                                    </div>
+
+                                    <div className="flex items-center gap-2">
+                                        <button
+                                            type="button"
+                                            onClick={() => moveCheckoutField(index, -1)}
+                                            disabled={index === 0}
+                                            className="h-9 w-9 rounded-lg border text-gray-500 hover:bg-gray-50 disabled:opacity-40"
+                                            aria-label="Subir campo"
+                                        >
+                                            <i className="fa-solid fa-arrow-up text-xs" />
+                                        </button>
+                                        <button
+                                            type="button"
+                                            onClick={() => moveCheckoutField(index, 1)}
+                                            disabled={index === checkoutFields.length - 1}
+                                            className="h-9 w-9 rounded-lg border text-gray-500 hover:bg-gray-50 disabled:opacity-40"
+                                            aria-label="Bajar campo"
+                                        >
+                                            <i className="fa-solid fa-arrow-down text-xs" />
+                                        </button>
+                                        <button
+                                            type="button"
+                                            onClick={() => setCheckoutFields((prev) => prev.filter((item) => item.id !== field.id))}
+                                            className="h-9 w-9 rounded-lg border border-red-100 text-red-500 hover:bg-red-50"
+                                            aria-label="Eliminar campo"
+                                        >
+                                            <i className="fa-solid fa-trash text-xs" />
+                                        </button>
+                                    </div>
+                                </div>
+
+                                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                                    <div>
+                                        <label className="text-xs font-semibold text-gray-600">Nombre del campo</label>
+                                        <input
+                                            className="mt-1 w-full rounded-lg border p-3 text-sm"
+                                            placeholder="Ej: Cedula, NIT, Barrio"
+                                            value={field.label}
+                                            onChange={(e) => updateCheckoutField(field.id, { label: e.target.value })}
+                                        />
+                                    </div>
+                                    <div>
+                                        <label className="text-xs font-semibold text-gray-600">Tipo</label>
+                                        <select
+                                            className="mt-1 w-full rounded-lg border p-3 text-sm"
+                                            value={field.type}
+                                            onChange={(e) => updateCheckoutField(field.id, { type: e.target.value as CheckoutFieldType })}
+                                        >
+                                            {checkoutFieldTypes.map((type) => (
+                                                <option key={type.value} value={type.value}>
+                                                    {type.label}
+                                                </option>
+                                            ))}
+                                        </select>
+                                    </div>
+                                </div>
+
+                                {field.type === "select" ? (
+                                    <div>
+                                        <label className="text-xs font-semibold text-gray-600">Opciones</label>
+                                        <textarea
+                                            className="mt-1 w-full rounded-lg border p-3 text-sm"
+                                            rows={3}
+                                            placeholder={"Una opcion por linea\nEj: Persona natural\nEmpresa"}
+                                            value={(field.options || []).join("\n")}
+                                            onChange={(e) =>
+                                                updateCheckoutField(field.id, {
+                                                    options: e.target.value
+                                                        .split("\n")
+                                                        .map((option) => option.trim())
+                                                        .filter(Boolean),
+                                                })
+                                            }
+                                        />
+                                    </div>
+                                ) : (
+                                    <div>
+                                        <label className="text-xs font-semibold text-gray-600">Texto de ayuda</label>
+                                        <input
+                                            className="mt-1 w-full rounded-lg border p-3 text-sm"
+                                            placeholder="Ej: Escribe tu numero de cedula"
+                                            value={field.placeholder || ""}
+                                            onChange={(e) => updateCheckoutField(field.id, { placeholder: e.target.value })}
+                                        />
+                                    </div>
+                                )}
+
+                                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                                    <label className="flex items-center gap-3 rounded-lg border border-gray-100 bg-gray-50 p-3">
+                                        <input
+                                            type="checkbox"
+                                            checked={field.required}
+                                            onChange={(e) => updateCheckoutField(field.id, { required: e.target.checked })}
+                                        />
+                                        <span className="text-sm font-semibold text-gray-700">Campo obligatorio</span>
+                                    </label>
+                                    <label className="flex items-center gap-3 rounded-lg border border-gray-100 bg-gray-50 p-3">
+                                        <input
+                                            type="checkbox"
+                                            checked={field.enabled}
+                                            onChange={(e) => updateCheckoutField(field.id, { enabled: e.target.checked })}
+                                        />
+                                        <span className="text-sm font-semibold text-gray-700">Mostrar en el checkout</span>
+                                    </label>
+                                </div>
+                            </div>
+                        ))}
                     </div>
                 )}
             </div>

@@ -662,9 +662,9 @@ const ProductsView: React.FC = () => {
       let createdCategories = 0;
 
       const countSnap = await getCountFromServer(prodsRef);
-      let orderCounter = countSnap.data().count;
+      const importOrderBase = countSnap.data().count;
 
-      for (const row of rows) {
+      for (const [rowIndex, row] of rows.entries()) {
         const excelId = String(row["ID"] ?? "").trim();
         const name = String(row["Nombre"] ?? "").trim();
         const skuValue = String(row["SKU"] ?? "").trim();
@@ -765,7 +765,8 @@ const ProductsView: React.FC = () => {
         const variants = parseJsonSafe<Variant[]>(row["Variantes"], []);
         const options = parseJsonSafe<ProductOption[]>(row["Opciones"], []);
 
-        const orderValue = parseNumberSafe(row["Orden"]);
+        const hasOrderValue = String(row["Orden"] ?? "").trim() !== "";
+        const orderValue = hasOrderValue ? parseNumberSafe(row["Orden"]) : 0;
         const isActiveRaw = row["Visible en catálogo"];
         const hasIsActiveValue = String(isActiveRaw ?? "").trim() !== "";
         const isActiveValue = hasIsActiveValue
@@ -789,7 +790,7 @@ const ProductsView: React.FC = () => {
           options,
           variants,
           isActive: isActiveValue,
-          order: Number.isFinite(orderValue) ? orderValue : orderCounter++,
+          order: hasOrderValue && Number.isFinite(orderValue) ? orderValue : importOrderBase + rowIndex,
           ...optionalImportFields,
           updatedAt: serverTimestamp(),
         };

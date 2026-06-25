@@ -75,6 +75,24 @@ const allProductsCache = new Map<string, Product[]>();
 // ── Helpers de envío ──────────────────────────────────────────────────────────
 
 type ShippingMethod = "cod" | "carrier";
+type CheckoutFieldType = "text" | "number" | "tel" | "email" | "textarea" | "select" | "date";
+
+type CheckoutFieldConfig = {
+  id: string;
+  label: string;
+  type: CheckoutFieldType;
+  required: boolean;
+  enabled: boolean;
+  placeholder?: string;
+  options?: string[];
+};
+
+type CheckoutFieldAnswer = {
+  id: string;
+  label: string;
+  type: CheckoutFieldType;
+  value: string;
+};
 
 interface ShippingConfig {
   enabled: boolean;
@@ -93,6 +111,23 @@ const getShippingConfig = (store: any): ShippingConfig => ({
   note: store?.shippingNote ?? "",
   hidePrices: store?.shippingHidePrices ?? false,
 });
+
+const getCheckoutFields = (store: any): CheckoutFieldConfig[] => {
+  const fields = Array.isArray(store?.checkoutFields) ? store.checkoutFields : [];
+  return fields
+    .map((field: any) => ({
+      id: String(field.id || ""),
+      label: String(field.label || "").trim(),
+      type: field.type || "text",
+      required: field.required === true,
+      enabled: field.enabled !== false,
+      placeholder: String(field.placeholder || "").trim(),
+      options: Array.isArray(field.options)
+        ? field.options.map((option: any) => String(option).trim()).filter(Boolean)
+        : [],
+    }))
+    .filter((field: CheckoutFieldConfig) => field.id && field.label && field.enabled);
+};
 
 const SHIPPING_LABELS: Record<ShippingMethod, { label: string; icon: string; color: string; bg: string }> = {
   cod: {
@@ -302,6 +337,7 @@ const CatalogView: React.FC = () => {
   const [customerPhone, setCustomerPhone] = useState("");
   const [customerAddress, setCustomerAddress] = useState("");
   const [customerNotes, setCustomerNotes] = useState("");
+  const [customFieldValues, setCustomFieldValues] = useState<Record<string, string>>({});
 
   // Envío
   const [selectedShipping, setSelectedShipping] = useState<ShippingMethod | null>(null);
@@ -333,12 +369,14 @@ const CatalogView: React.FC = () => {
     open: boolean;
     product: Product | null;
     selectedVariantId?: string | null;
-  }>({ open: false, product: null, selectedVariantId: null });
+    quantity: number;
+  }>({ open: false, product: null, selectedVariantId: null, quantity: 1 });
 
   const [shareToast, setShareToast] = useState(false);
 
   // ── Configuración de envío derivada del store ──
   const shippingConfig = useMemo(() => getShippingConfig(store), [store]);
+  const checkoutFields = useMemo(() => getCheckoutFields(store), [store]);
   const cashOnDeliveryAvailable = useMemo(
     () => cart.every((item) => item.allowsCashOnDelivery !== false),
     [cart],
@@ -347,6 +385,16 @@ const CatalogView: React.FC = () => {
     () => shippingConfig.methods.filter((method) => method !== "cod" || cashOnDeliveryAvailable),
     [shippingConfig.methods, cashOnDeliveryAvailable],
   );
+
+  useEffect(() => {
+    setCustomFieldValues((current) => {
+      const allowedIds = new Set(checkoutFields.map((field) => field.id));
+      const next = Object.fromEntries(
+        Object.entries(current).filter(([id]) => allowedIds.has(id)),
+      );
+      return Object.keys(next).length === Object.keys(current).length ? current : next;
+    });
+  }, [checkoutFields]);
 
   // Auto-seleccionar primer método si solo hay uno
   useEffect(() => {
@@ -528,7 +576,7 @@ const CatalogView: React.FC = () => {
       let cursor: QueryDocumentSnapshot<DocumentData> | null = null;
       while (true) {
         const constraints: any[] = [
-          orderBy("createdAt", "desc"),
+          orderBy("order", "asc"),
           limit(ALL_BATCH),
         ];
         if (cursor) constraints.splice(1, 0, startAfter(cursor));
@@ -578,7 +626,7 @@ const CatalogView: React.FC = () => {
       try {
         const baseRef = collection(db, "stores", storeId, "products");
         const constraints: any[] = [
-          orderBy("createdAt", "desc"),
+          orderBy("order", "asc"),
           limit(PAGE_SIZE + 1),
         ];
         if (categoryId !== "all")
@@ -628,7 +676,7 @@ const CatalogView: React.FC = () => {
     try {
       const baseRef = collection(db, "stores", store.id, "products");
       const constraints: any[] = [
-        orderBy("createdAt", "desc"),
+        orderBy("order", "asc"),
         startAfter(lastDoc),
         limit(PAGE_SIZE + 1),
       ];
@@ -684,7 +732,19 @@ const CatalogView: React.FC = () => {
     }
   }, [store?.id, catalogUnavailableReason]);
 
-  const addToCart = (prod: Product, variant?: Variant) => {
+  const getCartItemMaxStock = (item: CartItem) => {
+    const prod = [...products, ...allProducts].find((p) => p.id === item.productId);
+    const v = prod?.variants?.find((vv) => vv.id === item.variantId);
+    return v && typeof v.stock === "number" ? v.stock : undefined;
+  };
+
+  const normalizeQuantity = (value: number, maxStock?: number) => {
+    const qty = Number.isFinite(value) ? Math.floor(value) : 1;
+    if (maxStock !== undefined) return Math.min(Math.max(qty, 1), maxStock);
+    return Math.max(qty, 1);
+  };
+
+  const addToCart = (prod: Product, variant?: Variant, quantity = 1) => {
     const baseUnitPrice = getBaseUnitPrice(prod, variant, isWholesaleCatalog);
     const unitPrice = getFinalUnitPrice(prod, variant, isWholesaleCatalog);
     if (!unitPrice) return;
@@ -692,6 +752,8 @@ const CatalogView: React.FC = () => {
       alert("Esta variante está agotada.");
       return;
     }
+    const maxStock = variant && typeof variant.stock === "number" ? variant.stock : undefined;
+    const qtyToAdd = normalizeQuantity(quantity, maxStock);
     const item: CartItem = {
       productId: prod.id,
       productName: prod.name,
@@ -702,7 +764,7 @@ const CatalogView: React.FC = () => {
       originalUnitPrice: baseUnitPrice,
       priceType: isWholesaleCatalog ? "wholesale" : "retail",
       hasDiscount: hasValidDiscount((prod as any).discount),
-      qty: 1,
+      qty: qtyToAdd,
       imageUrl: getProductMainImage(prod),
       allowsCashOnDelivery: prod.allowsCashOnDelivery ?? true,
     };
@@ -714,7 +776,10 @@ const CatalogView: React.FC = () => {
       );
       if (idx >= 0) {
         const next = [...prev];
-        next[idx] = { ...next[idx], qty: next[idx].qty + 1 };
+        next[idx] = {
+          ...next[idx],
+          qty: normalizeQuantity(next[idx].qty + qtyToAdd, maxStock),
+        };
         return next;
       }
       return [...prev, item];
@@ -727,9 +792,7 @@ const CatalogView: React.FC = () => {
       const it = next[index];
       if (!it) return prev;
       const q = it.qty + delta;
-      const prod = products.find((p) => p.id === it.productId);
-      const v = prod?.variants?.find((vv) => vv.id === it.variantId);
-      const maxStock = v && typeof v.stock === "number" ? v.stock : undefined;
+      const maxStock = getCartItemMaxStock(it);
       if (maxStock !== undefined && q > maxStock) return prev;
       if (q <= 0) next.splice(index, 1);
       else next[index] = { ...it, qty: q };
@@ -737,10 +800,23 @@ const CatalogView: React.FC = () => {
     });
   };
 
+  const setCartQty = (index: number, quantity: number) => {
+    setCart((prev) => {
+      const next = [...prev];
+      const it = next[index];
+      if (!it) return prev;
+      next[index] = {
+        ...it,
+        qty: normalizeQuantity(quantity, getCartItemMaxStock(it)),
+      };
+      return next;
+    });
+  };
+
   const clearCart = () => setCart([]);
 
   const openAddFlow = (prod: Product) => {
-    setProductModal({ open: true, product: prod, selectedVariantId: null });
+    setProductModal({ open: true, product: prod, selectedVariantId: null, quantity: 1 });
   };
 
   const placeOrder = async () => {
@@ -749,9 +825,23 @@ const CatalogView: React.FC = () => {
     const cleanName = customerName.trim();
     const cleanPhone = customerPhone.trim().replace(/[^\d]/g, "");
     const cleanAddress = customerAddress.trim();
+    const customFields: CheckoutFieldAnswer[] = checkoutFields.map((field) => ({
+      id: field.id,
+      label: field.label,
+      type: field.type,
+      value: (customFieldValues[field.id] || "").trim(),
+    }));
+    const missingCustomField = customFields.find(
+      (field) => checkoutFields.find((config) => config.id === field.id)?.required && !field.value,
+    );
     if (!cleanName) return alert("Escribe tu nombre.");
     if (!cleanPhone) return alert("Escribe tu teléfono.");
     if (!cleanAddress) return alert("Escribe tu dirección.");
+    if (missingCustomField) return alert(`Completa el campo: ${missingCustomField.label}.`);
+    const invalidEmailField = customFields.find(
+      (field) => field.type === "email" && field.value && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(field.value),
+    );
+    if (invalidEmailField) return alert(`El correo de ${invalidEmailField.label} no es valido.`);
     if (!/^\d{7,15}$/.test(cleanPhone))
       return alert("Teléfono inválido. Usa solo números.");
     if (!store.whatsapp)
@@ -848,6 +938,7 @@ const CatalogView: React.FC = () => {
             name: cleanName,
             phone: cleanPhone,
             address: cleanAddress,
+            customFields,
             notes: "",
             createdAt: serverTimestamp(),
             updatedAt: serverTimestamp(),
@@ -859,6 +950,7 @@ const CatalogView: React.FC = () => {
           tx.update(clientRef, {
             name: cleanName,
             address: cleanAddress,
+            customFields,
             updatedAt: serverTimestamp(),
             lastOrderAt: serverTimestamp(),
             totalOrders: increment(1),
@@ -874,7 +966,9 @@ const CatalogView: React.FC = () => {
             name: cleanName,
             phone: cleanPhone,
             address: cleanAddress,
+            customFields,
           },
+          customFields,
           notes: customerNotes.trim() || "",
           customerType: isWholesaleCatalog ? "wholesale" : "retail",
           items,
@@ -898,6 +992,11 @@ const CatalogView: React.FC = () => {
       lines.push(`👤 Cliente: *${cleanName}*`);
       lines.push(`📞 Tel: ${cleanPhone}`);
       lines.push(`📍 Dirección: ${cleanAddress}`);
+      customFields
+        .filter((field) => field.value)
+        .forEach((field) => {
+          lines.push(`${field.label}: ${field.value}`);
+        });
       if (customerNotes.trim()) lines.push(`📝 Notas: ${customerNotes.trim()}`);
       lines.push("");
       lines.push("📦 *Productos*:");
@@ -919,6 +1018,7 @@ const CatalogView: React.FC = () => {
 
       const waUrl = buildWaLink(store.whatsapp, lines.join("\n"));
       clearCart();
+      setCustomFieldValues({});
       setCheckoutOpen(false);
       window.open(waUrl, "_blank", "noopener,noreferrer");
     } catch (e) {
@@ -1437,7 +1537,7 @@ const CatalogView: React.FC = () => {
               </div>
               <button
                 onClick={() =>
-                  setProductModal({ open: false, product: null, selectedVariantId: null })
+                  setProductModal({ open: false, product: null, selectedVariantId: null, quantity: 1 })
                 }
                 className="h-10 w-10 rounded-full border flex items-center justify-center hover:bg-gray-50 shrink-0"
                 aria-label="Cerrar"
@@ -1515,7 +1615,6 @@ const CatalogView: React.FC = () => {
                     {(productModal.product.variants || []).map((v) => {
                       const outOfStock = typeof v.stock === "number" && v.stock <= 0;
                       const selected = productModal.selectedVariantId === v.id;
-                      const d = (productModal.product as any).discount;
                       const base = getBaseUnitPrice(productModal.product, v, isWholesaleCatalog);
                       const final = getFinalUnitPrice(productModal.product, v, isWholesaleCatalog);
                       return (
@@ -1524,7 +1623,11 @@ const CatalogView: React.FC = () => {
                           type="button"
                           disabled={outOfStock}
                           onClick={() =>
-                            setProductModal((pm) => ({ ...pm, selectedVariantId: v.id }))
+                            setProductModal((pm) => ({
+                              ...pm,
+                              selectedVariantId: v.id,
+                              quantity: normalizeQuantity(pm.quantity, typeof v.stock === "number" ? v.stock : undefined),
+                            }))
                           }
                           className={`w-full rounded-2xl p-4 border flex items-center justify-between text-left transition
                           ${outOfStock ? "opacity-50 cursor-not-allowed bg-gray-50" : "bg-white hover:bg-gray-50"}`}
@@ -1555,6 +1658,70 @@ const CatalogView: React.FC = () => {
                   </div>
                 </div>
               ) : null}
+
+              {(() => {
+                const selectedVariant = (productModal.product?.variants || []).find(
+                  (v) => v.id === productModal.selectedVariantId,
+                );
+                const maxStock =
+                  selectedVariant && typeof selectedVariant.stock === "number"
+                    ? selectedVariant.stock
+                    : undefined;
+
+                return (
+                  <div className="space-y-2">
+                    <label
+                      htmlFor="product-quantity"
+                      className="text-sm font-extrabold text-gray-900"
+                    >
+                      Cantidad
+                    </label>
+                    <div className="flex items-center gap-2">
+                      <button
+                        type="button"
+                        className="h-11 w-11 rounded-xl border hover:bg-gray-50 shrink-0"
+                        onClick={() =>
+                          setProductModal((pm) => ({
+                            ...pm,
+                            quantity: normalizeQuantity(pm.quantity - 1, maxStock),
+                          }))
+                        }
+                        aria-label="Restar cantidad"
+                      >
+                        <i className="fa-solid fa-minus text-xs" />
+                      </button>
+                      <input
+                        id="product-quantity"
+                        type="number"
+                        min={1}
+                        max={maxStock}
+                        inputMode="numeric"
+                        value={productModal.quantity}
+                        onChange={(e) =>
+                          setProductModal((pm) => ({
+                            ...pm,
+                            quantity: normalizeQuantity(Number(e.target.value), maxStock),
+                          }))
+                        }
+                        className="h-11 w-full rounded-xl border border-gray-200 px-3 text-center font-extrabold outline-none focus:border-gray-400"
+                      />
+                      <button
+                        type="button"
+                        className="h-11 w-11 rounded-xl border hover:bg-gray-50 shrink-0"
+                        onClick={() =>
+                          setProductModal((pm) => ({
+                            ...pm,
+                            quantity: normalizeQuantity(pm.quantity + 1, maxStock),
+                          }))
+                        }
+                        aria-label="Sumar cantidad"
+                      >
+                        <i className="fa-solid fa-plus text-xs" />
+                      </button>
+                    </div>
+                  </div>
+                );
+              })()}
             </div>
 
             <div className="p-4 sm:p-6 border-t bg-white">
@@ -1566,11 +1733,11 @@ const CatalogView: React.FC = () => {
                   if (variants.length > 0) {
                     const chosen = variants.find((v) => v.id === productModal.selectedVariantId);
                     if (!chosen) return alert("Selecciona una variante.");
-                    addToCart(p, chosen);
+                    addToCart(p, chosen, productModal.quantity);
                   } else {
-                    addToCart(p);
+                    addToCart(p, undefined, productModal.quantity);
                   }
-                  setProductModal({ open: false, product: null, selectedVariantId: null });
+                  setProductModal({ open: false, product: null, selectedVariantId: null, quantity: 1 });
                 }}
                 className="w-full rounded-2xl py-3 font-extrabold text-white hover:opacity-90"
                 style={{ background: brandColor }}
@@ -1580,7 +1747,7 @@ const CatalogView: React.FC = () => {
               <button
                 type="button"
                 onClick={() =>
-                  setProductModal({ open: false, product: null, selectedVariantId: null })
+                  setProductModal({ open: false, product: null, selectedVariantId: null, quantity: 1 })
                 }
                 className="w-full rounded-2xl py-3 font-extrabold border hover:bg-gray-50 mt-2"
               >
@@ -1670,7 +1837,16 @@ const CatalogView: React.FC = () => {
                           >
                             <i className="fa-solid fa-minus text-xs" />
                           </button>
-                          <div className="w-6 text-center font-extrabold">{it.qty}</div>
+                          <input
+                            type="number"
+                            min={1}
+                            max={getCartItemMaxStock(it)}
+                            inputMode="numeric"
+                            value={it.qty}
+                            onChange={(e) => setCartQty(idx, Number(e.target.value))}
+                            className="h-9 w-20 rounded-xl border border-gray-200 px-2 text-center font-extrabold outline-none focus:border-gray-400"
+                            aria-label={`Cantidad de ${it.productName}`}
+                          />
                           <button
                             className="w-9 h-9 rounded-xl border hover:bg-gray-50"
                             onClick={() => changeQty(idx, +1)}
@@ -1827,6 +2003,74 @@ const CatalogView: React.FC = () => {
                     onChange={(e) => setCustomerAddress(e.target.value)}
                   />
                 </div>
+                {checkoutFields.length > 0 ? (
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                    {checkoutFields.map((field) => {
+                      const value = customFieldValues[field.id] || "";
+                      const setValue = (nextValue: string) =>
+                        setCustomFieldValues((current) => ({
+                          ...current,
+                          [field.id]: nextValue,
+                        }));
+                      const label = `${field.label}${field.required ? " *" : ""}`;
+
+                      if (field.type === "textarea") {
+                        return (
+                          <div key={field.id} className="sm:col-span-2">
+                            <label className="text-xs font-semibold text-gray-600">{label}</label>
+                            <textarea
+                              className="w-full mt-1 p-3 border rounded-2xl focus:outline-none focus:ring-2 focus:ring-indigo-200"
+                              placeholder={field.placeholder || field.label}
+                              value={value}
+                              onChange={(e) => setValue(e.target.value)}
+                              rows={3}
+                            />
+                          </div>
+                        );
+                      }
+
+                      if (field.type === "select") {
+                        return (
+                          <div key={field.id}>
+                            <label className="text-xs font-semibold text-gray-600">{label}</label>
+                            <select
+                              className="w-full mt-1 p-3 border rounded-2xl bg-white focus:outline-none focus:ring-2 focus:ring-indigo-200"
+                              value={value}
+                              onChange={(e) => setValue(e.target.value)}
+                            >
+                              <option value="">Selecciona una opcion</option>
+                              {(field.options || []).map((option) => (
+                                <option key={option} value={option}>
+                                  {option}
+                                </option>
+                              ))}
+                            </select>
+                          </div>
+                        );
+                      }
+
+                      return (
+                        <div key={field.id}>
+                          <label className="text-xs font-semibold text-gray-600">{label}</label>
+                          <input
+                            type={field.type === "tel" ? "tel" : field.type}
+                            inputMode={
+                              field.type === "number"
+                                ? "numeric"
+                                : field.type === "tel"
+                                  ? "tel"
+                                  : undefined
+                            }
+                            className="w-full mt-1 p-3 border rounded-2xl focus:outline-none focus:ring-2 focus:ring-indigo-200"
+                            placeholder={field.placeholder || field.label}
+                            value={value}
+                            onChange={(e) => setValue(e.target.value)}
+                          />
+                        </div>
+                      );
+                    })}
+                  </div>
+                ) : null}
                 <div>
                   <label className="text-xs font-semibold text-gray-600">
                     Notas (opcional)
