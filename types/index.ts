@@ -55,6 +55,25 @@ export type CartItem = {
     sku?: string;
 };
 
+export type CheckoutFieldType = "text" | "number" | "tel" | "email" | "textarea" | "select" | "date";
+
+export type CheckoutFieldConfig = {
+    id: string;
+    label: string;
+    type: CheckoutFieldType;
+    required: boolean;
+    enabled: boolean;
+    placeholder?: string;
+    options?: string[];
+};
+
+export type CheckoutFieldAnswer = {
+    id: string;
+    label: string;
+    type: CheckoutFieldType;
+    value: string;
+};
+
 
 export type OrderStatus = "new" | "confirmed" | "preparing" | "delivered" | "cancelled";
 
@@ -76,9 +95,11 @@ export type Order = {
         name: string;
         phone: string;
         address: string;
+        customFields?: CheckoutFieldAnswer[];
     };
     notes?: string;
     items: OrderItem[];
+    customFields?: CheckoutFieldAnswer[];
     total: number; // COP int
     createdAt?: any;
     updatedAt?: any;

@@ -9,6 +9,7 @@ import {
     addDoc,
     where,
     serverTimestamp,
+    getCountFromServer,
 } from "firebase/firestore";
 import { db } from "@/lib/firebase"; // ajusta tu path
 
@@ -104,6 +105,8 @@ export default function ImportProductsExcel({ storeId }: { storeId: string }) {
 
             // 3) Insertar productos
             const prodsRef = collection(db, "stores", storeId, "products");
+            const countSnap = await getCountFromServer(prodsRef);
+            const importOrderBase = countSnap.data().count;
 
             let created = 0;
             let failed = 0;
@@ -112,7 +115,7 @@ export default function ImportProductsExcel({ storeId }: { storeId: string }) {
             // (Opcional) evitar duplicados por SKU: consulta previa
             // Si tienes muchos, mejor crear un índice en Firestore y consultar por lotes.
             // Aquí haremos una consulta por SKU (sencilla, funciona bien para cientos).
-            for (const r of rows) {
+            for (const [rowIndex, r] of rows.entries()) {
                 try {
                     const catId = catNameToId.get(r.categoryName.toLowerCase());
                     if (!catId) throw new Error(`No se pudo resolver categoría: ${r.categoryName}`);
@@ -134,6 +137,7 @@ export default function ImportProductsExcel({ storeId }: { storeId: string }) {
                         videos: [],
                         options: [],
                         variants: [],
+                        order: importOrderBase + rowIndex,
                         createdAt: serverTimestamp(),
                         updatedAt: serverTimestamp(),
                     });

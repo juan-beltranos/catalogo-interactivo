@@ -181,6 +181,11 @@ const OrdersView: React.FC = () => {
       subtotal: Number(x.subtotal ?? x.total ?? 0),
       shippingMethod: x.shippingMethod ?? null,
       shippingCost: Number(x.shippingCost ?? 0),
+      customFields: Array.isArray(x.customFields)
+        ? x.customFields
+        : Array.isArray(customer.customFields)
+          ? customer.customFields
+          : [],
       total: Number(x.total ?? 0),
       createdAt: x.createdAt,
       updatedAt: x.updatedAt,
@@ -526,6 +531,23 @@ const OrdersView: React.FC = () => {
                       <p className="text-gray-500">
                         <strong>Notas:</strong> {selectedOrder.notes}
                       </p>
+                    ) : null}
+                    {Array.isArray((selectedOrder as any).customFields) &&
+                    (selectedOrder as any).customFields.length > 0 ? (
+                      <div className="mt-3 rounded-xl border border-gray-100 bg-gray-50 p-3">
+                        <div className="mb-2 text-xs font-bold uppercase text-gray-400">
+                          Datos adicionales
+                        </div>
+                        <div className="space-y-1">
+                          {(selectedOrder as any).customFields
+                            .filter((field: any) => field?.value)
+                            .map((field: any) => (
+                              <p key={field.id || field.label} className="text-gray-600">
+                                <strong>{field.label}:</strong> {field.value}
+                              </p>
+                            ))}
+                        </div>
+                      </div>
                     ) : null}
                   </div>
                 </div>
