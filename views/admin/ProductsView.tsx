@@ -358,7 +358,7 @@ const ProductsView: React.FC = () => {
     }
     setSearching(true);
     try {
-      const snap = await getDocs(query(prodsRef, orderBy("createdAt", "desc")));
+      const snap = await getDocs(query(prodsRef, orderBy("order", "asc")));
       const all = snap.docs.map(mapDocToProduct);
       allProductsCache.set(storeId, all);
       setAllProducts(all);
@@ -374,7 +374,7 @@ const ProductsView: React.FC = () => {
   const reloadAllProducts = useCallback(async () => {
     if (!prodsRef || !storeId) return;
     try {
-      const snap = await getDocs(query(prodsRef, orderBy("createdAt", "desc")));
+      const snap = await getDocs(query(prodsRef, orderBy("order", "asc")));
       const all = snap.docs.map(mapDocToProduct);
       allProductsCache.set(storeId, all);
       setAllProducts(all);
@@ -531,7 +531,7 @@ const ProductsView: React.FC = () => {
         "Valor descuento": "",
         "Visible en catálogo": "Sí",
         "Envío contra entrega": "Sí",
-        Orden: 1,
+        Orden: "",
         Variantes: "",
         Opciones: "",
       },
@@ -554,6 +554,7 @@ const ProductsView: React.FC = () => {
       ["Envío contra entrega", "Escribe Sí o No. Si queda vacío, los productos nuevos lo tendrán habilitado y las actualizaciones no cambiarán el valor actual."],
       ["Visible en catálogo", "Escribe Sí o No. Si queda vacío, el producto se importará como activo."],
       ["Descuento", "Usa Tiene descuento, Tipo descuento (percent o amount) y Valor descuento."],
+      ["Orden", "Opcional. Al importar, se respeta el orden visual de las filas del Excel."],
       ["Variantes y Opciones", "Opcional. Si las usas, conserva el formato JSON de un archivo exportado."],
     ]);
     instructionsSheet["!cols"] = [{ wch: 25 }, { wch: 105 }];
@@ -661,10 +662,10 @@ const ProductsView: React.FC = () => {
       let skipped = 0;
       let createdCategories = 0;
 
-      const countSnap = await getCountFromServer(prodsRef);
-      const importOrderBase = countSnap.data().count;
+      const importedProductIds = new Set<string>();
+      let importOrderCounter = 0;
 
-      for (const [rowIndex, row] of rows.entries()) {
+      for (const row of rows) {
         const excelId = String(row["ID"] ?? "").trim();
         const name = String(row["Nombre"] ?? "").trim();
         const skuValue = String(row["SKU"] ?? "").trim();
@@ -765,8 +766,7 @@ const ProductsView: React.FC = () => {
         const variants = parseJsonSafe<Variant[]>(row["Variantes"], []);
         const options = parseJsonSafe<ProductOption[]>(row["Opciones"], []);
 
-        const hasOrderValue = String(row["Orden"] ?? "").trim() !== "";
-        const orderValue = hasOrderValue ? parseNumberSafe(row["Orden"]) : 0;
+        const rowOrder = importOrderCounter++;
         const isActiveRaw = row["Visible en catálogo"];
         const hasIsActiveValue = String(isActiveRaw ?? "").trim() !== "";
         const isActiveValue = hasIsActiveValue
@@ -790,7 +790,7 @@ const ProductsView: React.FC = () => {
           options,
           variants,
           isActive: isActiveValue,
-          order: hasOrderValue && Number.isFinite(orderValue) ? orderValue : importOrderBase + rowIndex,
+          order: rowOrder,
           ...optionalImportFields,
           updatedAt: serverTimestamp(),
         };
@@ -814,9 +814,10 @@ const ProductsView: React.FC = () => {
             doc(db, "stores", storeId, "products", existingProduct.id),
             payload
           );
+          importedProductIds.add(existingProduct.id);
           updated++;
         } else {
-          await addDoc(prodsRef, {
+          const newProductRef = await addDoc(prodsRef, {
             ...payload,
             wholesalePrice: hasWholesalePrice ? wholesalePrice : null,
             allowsCashOnDelivery: hasCashOnDeliveryValue
@@ -824,8 +825,21 @@ const ProductsView: React.FC = () => {
               : true,
             createdAt: serverTimestamp(),
           });
+          importedProductIds.add(newProductRef.id);
           created++;
         }
+      }
+
+      const productsNotInExcel = existingProducts.filter((p) => !importedProductIds.has(p.id));
+      for (let start = 0; start < productsNotInExcel.length; start += 450) {
+        const batch = writeBatch(db);
+        productsNotInExcel.slice(start, start + 450).forEach((product, index) => {
+          batch.update(doc(db, "stores", storeId, "products", product.id), {
+            order: rows.length + start + index,
+            updatedAt: serverTimestamp(),
+          });
+        });
+        await batch.commit();
       }
 
       await loadFirstPage();
@@ -928,7 +942,7 @@ const ProductsView: React.FC = () => {
     setImageFiles([]); setVideoFiles([]); setUseVariants(false); setCreateVariants([]); setIsActive(true); setAllowsCashOnDelivery(true);
   };
 
-  // ── loadPage: ordena por `order` ASC si existe, sino por `createdAt` DESC ──
+  // ── loadPage: usa el mismo orden que el catálogo público ──
   const loadPage = useCallback(
     async (
       mode: "first" | "next" | "prev",
@@ -938,8 +952,7 @@ const ProductsView: React.FC = () => {
       if (!prodsRef || !storeId) return;
       setLoadingPage(true);
       try {
-        // Intentamos cargar con orden personalizado primero
-        let qBase = query(prodsRef, orderBy("order", "asc"), orderBy("createdAt", "desc"));
+        let qBase = query(prodsRef, orderBy("order", "asc"));
 
         if (mode === "next" && lastDoc) {
           qBase = query(qBase, startAfter(lastDoc), limit(PAGE_SIZE + 1));
@@ -949,18 +962,7 @@ const ProductsView: React.FC = () => {
           qBase = query(qBase, limit(PAGE_SIZE + 1));
         }
 
-        let snap;
-        try {
-          snap = await getDocs(qBase);
-        } catch {
-          // Fallback: si el índice compuesto no existe, usamos solo createdAt
-          let fallback = query(prodsRef, orderBy("createdAt", "desc"));
-          if (mode === "next" && lastDoc) fallback = query(fallback, startAfter(lastDoc), limit(PAGE_SIZE + 1));
-          else if (mode === "prev" && firstDoc) fallback = query(fallback, endBefore(firstDoc), limitToLast(PAGE_SIZE + 1));
-          else fallback = query(fallback, limit(PAGE_SIZE + 1));
-          snap = await getDocs(fallback);
-        }
-
+        const snap = await getDocs(qBase);
         const docs = snap.docs;
         const nextExists = docs.length > PAGE_SIZE;
         const pageDocs = nextExists ? docs.slice(0, PAGE_SIZE) : docs;
