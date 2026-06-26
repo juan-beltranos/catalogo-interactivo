@@ -18,9 +18,6 @@ import {
   doc,
   runTransaction,
   increment,
-  QueryDocumentSnapshot,
-  DocumentData,
-  startAfter,
 } from "firebase/firestore";
 import { db } from "../../lib/firebase";
 import { Product, Store } from "@/interfaces";
@@ -44,11 +41,10 @@ import {
 } from "@/helpers/pricing";
 
 const PAGE_SIZE = 20;
-const ALL_BATCH = 500;
 
 type PageCache = {
   products: Product[];
-  lastDoc: QueryDocumentSnapshot<DocumentData> | null;
+  allProducts: Product[];
   hasMore: boolean;
 };
 const catalogCache = new Map<string, Map<string, PageCache>>();
@@ -355,8 +351,6 @@ const CatalogView: React.FC = () => {
 
   const [loadingMore, setLoadingMore] = useState(false);
   const [hasMore, setHasMore] = useState(false);
-  const [lastDoc, setLastDoc] =
-    useState<QueryDocumentSnapshot<DocumentData> | null>(null);
 
   const [allProducts, setAllProducts] = useState<Product[]>([]);
   const [allLoaded, setAllLoaded] = useState(false);
@@ -572,23 +566,11 @@ const CatalogView: React.FC = () => {
     setQueryError(null);
     try {
       const baseRef = collection(db, "stores", storeId, "products");
-      let acc: Product[] = [];
-      let cursor: QueryDocumentSnapshot<DocumentData> | null = null;
-      while (true) {
-        const constraints: any[] = [
-          orderBy("order", "asc"),
-          limit(ALL_BATCH),
-        ];
-        if (cursor) constraints.splice(1, 0, startAfter(cursor));
-        const qAll = query(baseRef, ...constraints);
-        const snap = await getDocs(qAll);
-        const docs = snap.docs;
-        acc = acc.concat(
-          docs.map((d) => ({ id: d.id, ...(d.data() as any) })) as Product[],
-        );
-        if (docs.length < ALL_BATCH) break;
-        cursor = docs[docs.length - 1];
-      }
+      const snap = await getDocs(baseRef);
+      const acc = snap.docs.map((d) => ({
+        id: d.id,
+        ...(d.data() as any),
+      })) as Product[];
       const sorted = sortProducts(acc);
       allProductsCache.set(storeId, sorted);
       setAllProducts(sorted);
@@ -617,7 +599,6 @@ const CatalogView: React.FC = () => {
       if (cached) {
         setProducts(cached.products);
         setHasMore(cached.hasMore);
-        setLastDoc(cached.lastDoc);
         setLoading(false);
         return;
       }
@@ -625,32 +606,26 @@ const CatalogView: React.FC = () => {
       setQueryError(null);
       try {
         const baseRef = collection(db, "stores", storeId, "products");
-        const constraints: any[] = [
-          orderBy("order", "asc"),
-          limit(PAGE_SIZE + 1),
-        ];
+        const constraints: any[] = [];
         if (categoryId !== "all")
-          constraints.unshift(where("categoryId", "==", categoryId));
+          constraints.push(where("categoryId", "==", categoryId));
         const qProds = query(baseRef, ...constraints);
         const snap = await getDocs(qProds);
-        const docs = snap.docs;
-        const more = docs.length > PAGE_SIZE;
-        const pageDocs = more ? docs.slice(0, PAGE_SIZE) : docs;
-        const pageProducts = sortProducts(
-          pageDocs.map((d) => ({
+        const sortedProducts = sortProducts(
+          snap.docs.map((d) => ({
             id: d.id,
             ...(d.data() as any),
           })) as Product[],
         );
-        const newLastDoc = pageDocs[pageDocs.length - 1] ?? null;
+        const pageProducts = sortedProducts.slice(0, PAGE_SIZE);
+        const more = sortedProducts.length > PAGE_SIZE;
         setCategoryCache(storeId, categoryId, {
           products: pageProducts,
-          lastDoc: newLastDoc,
+          allProducts: sortedProducts,
           hasMore: more,
         });
         setProducts(pageProducts);
         setHasMore(more);
-        setLastDoc(newLastDoc);
       } catch (e: any) {
         console.error("fetchFirstPage error:", e);
         const msg = String(e?.message || "")
@@ -661,7 +636,6 @@ const CatalogView: React.FC = () => {
         setQueryError(msg);
         setProducts([]);
         setHasMore(false);
-        setLastDoc(null);
       } finally {
         setLoading(false);
       }
@@ -670,41 +644,26 @@ const CatalogView: React.FC = () => {
   );
 
   const fetchMorePage = useCallback(async () => {
-    if (!store || catalogUnavailableReason || !lastDoc || !hasMore || loadingMore) return;
+    if (!store || catalogUnavailableReason || !hasMore || loadingMore) return;
     setLoadingMore(true);
     setQueryError(null);
     try {
-      const baseRef = collection(db, "stores", store.id, "products");
-      const constraints: any[] = [
-        orderBy("order", "asc"),
-        startAfter(lastDoc),
-        limit(PAGE_SIZE + 1),
-      ];
-      if (activeCategoryId !== "all")
-        constraints.unshift(where("categoryId", "==", activeCategoryId));
-      const qMore = query(baseRef, ...constraints);
-      const snap = await getDocs(qMore);
-      const docs = snap.docs;
-      const more = docs.length > PAGE_SIZE;
-      const pageDocs = more ? docs.slice(0, PAGE_SIZE) : docs;
-      const newProducts = pageDocs.map((d) => ({
-        id: d.id,
-        ...(d.data() as any),
-      })) as Product[];
-      const newLastDoc = pageDocs[pageDocs.length - 1] ?? lastDoc;
+      const cached = getCategoryCache(store.id, activeCategoryId);
+      if (!cached) {
+        await fetchFirstPage(store.id, activeCategoryId);
+        return;
+      }
       setProducts((prev) => {
-        // Preserve the visible page order: products loaded on subsequent pages
-        // must be appended below the products already displayed.
-        const merged = [...prev, ...newProducts];
+        const nextProducts = cached.allProducts.slice(0, prev.length + PAGE_SIZE);
+        const more = cached.allProducts.length > nextProducts.length;
         setCategoryCache(store.id, activeCategoryId, {
-          products: merged,
-          lastDoc: newLastDoc,
+          products: nextProducts,
+          allProducts: cached.allProducts,
           hasMore: more,
         });
-        return merged;
+        setHasMore(more);
+        return nextProducts;
       });
-      setHasMore(more);
-      setLastDoc(newLastDoc);
     } catch (e: any) {
       console.error("fetchMorePage error:", e);
       const msg = String(e?.message || "")
@@ -716,7 +675,7 @@ const CatalogView: React.FC = () => {
     } finally {
       setLoadingMore(false);
     }
-  }, [store, catalogUnavailableReason, lastDoc, hasMore, loadingMore, activeCategoryId]);
+  }, [store, catalogUnavailableReason, hasMore, loadingMore, activeCategoryId, fetchFirstPage]);
 
   useEffect(() => {
     if (!store || catalogUnavailableReason) return;
