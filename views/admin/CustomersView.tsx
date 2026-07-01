@@ -6,7 +6,8 @@ import {
   onSnapshot,
   where,
   getDocs,
-  limit,
+  deleteDoc,
+  doc,
 } from "firebase/firestore";
 import { db } from "../../lib/firebase";
 import { getStoreForOwner } from "@/lib/storeLookup";
@@ -191,12 +192,28 @@ const CustomersView: React.FC = () => {
     }
   };
 
+  const handleDeleteClient = async (client: Client) => {
+    if (!storeId) return;
+    const label = client.name || client.phone || "este cliente";
+    if (!window.confirm(`¿Eliminar a ${label} de clientes? Sus pedidos no se borrarán.`)) return;
+
+    try {
+      await deleteDoc(doc(db, "stores", storeId, "clients", client.id));
+      setClients((current) => current.filter((c) => c.id !== client.id));
+      setSelectedClient((current) => (current?.id === client.id ? null : current));
+    } catch (error) {
+      console.error("Error deleting client:", error);
+      alert("No se pudo eliminar el cliente.");
+    }
+  };
+
   const mapOrderDocToOrder = (d: any): Order => {
     const x = d.data() as any;
 
     const items: OrderItem[] = (x.items ?? []).map((it: any) => ({
       productId: it.productId ?? it.id ?? "",
       productName: it.productName ?? it.name ?? "",
+      sku: it.sku ?? null,
       variantId: it.variantId ?? null,
       variantTitle: it.variantTitle ?? null,
       unitPrice: Number(it.unitPrice ?? it.price ?? 0),
@@ -335,12 +352,21 @@ const CustomersView: React.FC = () => {
                     </td>
 
                     <td className="px-6 py-4 text-right">
-                      <button
-                        onClick={() => handleViewDetails(c)}
-                        className="text-indigo-600 hover:text-indigo-800 font-bold text-xs"
-                      >
-                        Ver historial
-                      </button>
+                      <div className="flex items-center justify-end gap-2">
+                        <button
+                          onClick={() => handleViewDetails(c)}
+                          className="text-indigo-600 hover:text-indigo-800 font-bold text-xs"
+                        >
+                          Ver historial
+                        </button>
+                        <button
+                          onClick={() => handleDeleteClient(c)}
+                          className="text-gray-400 hover:text-red-600 p-2"
+                          title="Eliminar cliente"
+                        >
+                          <i className="fa-solid fa-trash-can"></i>
+                        </button>
+                      </div>
                     </td>
                   </tr>
                 ))}
@@ -468,6 +494,13 @@ const CustomersView: React.FC = () => {
               ) : null}
 
               <div className="flex gap-2">
+                <button
+                  onClick={() => handleDeleteClient(selectedClient)}
+                  className="flex-1 border border-red-200 text-red-600 rounded-lg py-3 font-bold hover:bg-red-50"
+                >
+                  Eliminar
+                </button>
+
                 <button
                   onClick={() => copyToClipboard(selectedClient.phone)}
                   className="flex-1 border rounded-lg py-3 font-bold text-gray-700"
