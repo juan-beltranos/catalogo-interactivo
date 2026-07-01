@@ -716,7 +716,7 @@ const CatalogView: React.FC = () => {
     const item: CartItem = {
       productId: prod.id,
       productName: prod.name,
-      sku: prod.sku ?? undefined,
+      sku: variant?.sku || prod.sku || undefined,
       variantId: variant?.id,
       variantTitle: variant?.title,
       unitPrice,
@@ -821,6 +821,7 @@ const CatalogView: React.FC = () => {
       const items = cart.map((it) => ({
         productId: it.productId,
         productName: it.productName,
+        sku: it.sku ?? null,
         variantId: it.variantId ?? null,
         variantTitle: it.variantTitle ?? null,
         unitPrice: it.unitPrice,

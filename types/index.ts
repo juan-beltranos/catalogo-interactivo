@@ -80,6 +80,7 @@ export type OrderStatus = "new" | "confirmed" | "preparing" | "delivered" | "can
 export type OrderItem = {
     productId: string;
     productName: string;
+    sku?: string | null;
     variantId?: string | null;
     variantTitle?: string | null;
     unitPrice: number; // COP int

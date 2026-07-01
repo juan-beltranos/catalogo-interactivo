@@ -163,6 +163,7 @@ const OrdersView: React.FC = () => {
     const items: OrderItem[] = (x.items ?? []).map((it: any) => ({
       productId: it.productId ?? it.id ?? "",
       productName: it.productName ?? it.name ?? "",
+      sku: it.sku ?? null,
       variantId: it.variantId ?? null,
       variantTitle: it.variantTitle ?? null,
       unitPrice: Number(it.unitPrice ?? it.price ?? 0),
@@ -313,6 +314,7 @@ const OrdersView: React.FC = () => {
           <tr>
             <td>
               <strong>${escapeHtml(item.productName)}</strong>
+              ${item.sku ? `<div class="muted">SKU: ${escapeHtml(item.sku)}</div>` : ""}
               ${
                 item.variantTitle
                   ? `<div class="muted">${escapeHtml(item.variantTitle)}</div>`
@@ -790,6 +792,11 @@ const OrdersView: React.FC = () => {
                         <tr key={idx}>
                           <td className="px-4 py-3 text-gray-700 font-medium">
                             <div>{item.productName}</div>
+                            {item.sku ? (
+                              <div className="text-xs text-gray-400">
+                                SKU: {item.sku}
+                              </div>
+                            ) : null}
                             {item.variantTitle ? (
                               <div className="text-xs text-gray-400">
                                 {item.variantTitle}
