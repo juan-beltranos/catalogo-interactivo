@@ -142,6 +142,9 @@ const OrdersView: React.FC = () => {
 
     try {
       await deleteDoc(doc(db, "stores", storeId, "orders", orderId));
+      setOrders((current) => current.filter((order) => order.id !== orderId));
+      setSelectedOrder((current) => (current?.id === orderId ? null : current));
+      await loadFirstOrdersPage();
     } catch (error) {
       console.error("Error deleting order:", error);
       alert("Error al eliminar");
@@ -280,6 +283,155 @@ const OrdersView: React.FC = () => {
     const method = order.shippingMethod;
     if (!method) return null;
     return shippingMethodMeta[method] ?? null;
+  };
+
+  const escapeHtml = (value: any) =>
+    String(value ?? "")
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;")
+      .replace(/"/g, "&quot;")
+      .replace(/'/g, "&#039;");
+
+  const handlePrintOrderPdf = (order: Order) => {
+    const printWindow = window.open("", "_blank", "width=900,height=700");
+    if (!printWindow) {
+      alert("Permite las ventanas emergentes para generar el PDF del pedido.");
+      return;
+    }
+
+    const shippingMeta = getShippingMeta(order);
+    const shippingCost = Number((order as any).shippingCost ?? 0);
+    const subtotal = Number((order as any).subtotal ?? order.total ?? 0);
+    const customFields = Array.isArray((order as any).customFields)
+      ? (order as any).customFields.filter((field: any) => field?.value)
+      : [];
+
+    const itemsRows = order.items
+      .map(
+        (item) => `
+          <tr>
+            <td>
+              <strong>${escapeHtml(item.productName)}</strong>
+              ${
+                item.variantTitle
+                  ? `<div class="muted">${escapeHtml(item.variantTitle)}</div>`
+                  : ""
+              }
+            </td>
+            <td class="center">${escapeHtml(item.qty)}</td>
+            <td class="right">${escapeHtml(formatCOP(item.unitPrice))}</td>
+            <td class="right">${escapeHtml(formatCOP(item.subtotal))}</td>
+          </tr>
+        `,
+      )
+      .join("");
+
+    const customRows = customFields
+      .map(
+        (field: any) => `
+          <div><strong>${escapeHtml(field.label)}:</strong> ${escapeHtml(field.value)}</div>
+        `,
+      )
+      .join("");
+
+    printWindow.document.write(`
+      <!doctype html>
+      <html>
+        <head>
+          <meta charset="utf-8" />
+          <title>Pedido ${escapeHtml(order.id.substring(0, 8))}</title>
+          <style>
+            * { box-sizing: border-box; }
+            body { font-family: Arial, sans-serif; color: #111827; margin: 0; padding: 32px; }
+            header { display: flex; justify-content: space-between; gap: 24px; border-bottom: 2px solid #111827; padding-bottom: 16px; margin-bottom: 24px; }
+            h1 { margin: 0 0 6px; font-size: 24px; }
+            h2 { margin: 0 0 10px; font-size: 13px; letter-spacing: .08em; text-transform: uppercase; color: #6b7280; }
+            .muted { color: #6b7280; font-size: 12px; }
+            .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 24px; margin-bottom: 24px; }
+            .box { border: 1px solid #e5e7eb; border-radius: 8px; padding: 16px; }
+            .line { margin: 5px 0; }
+            table { width: 100%; border-collapse: collapse; margin-top: 10px; }
+            th { background: #f3f4f6; color: #4b5563; font-size: 11px; text-transform: uppercase; text-align: left; }
+            th, td { border-bottom: 1px solid #e5e7eb; padding: 10px; vertical-align: top; }
+            .center { text-align: center; }
+            .right { text-align: right; }
+            tfoot td { font-weight: 700; }
+            .total td { background: #eef2ff; color: #3730a3; font-size: 16px; }
+            @media print { body { padding: 18mm; } }
+          </style>
+        </head>
+        <body>
+          <header>
+            <div>
+              <h1>Pedido #${escapeHtml(order.id.substring(0, 8))}</h1>
+              <div class="muted">${escapeHtml(formatDate(order.createdAt))}</div>
+              <div class="muted">Canal: ${escapeHtml(order.channel || "whatsapp")}</div>
+            </div>
+            <div class="right">
+              <strong>${escapeHtml(statusMap[order.status]?.label || order.status)}</strong>
+              ${shippingMeta ? `<div class="muted">${escapeHtml(shippingMeta.label)}</div>` : ""}
+            </div>
+          </header>
+
+          <section class="grid">
+            <div class="box">
+              <h2>Cliente</h2>
+              <div class="line"><strong>Nombre:</strong> ${escapeHtml(order.customer?.name)}</div>
+              <div class="line"><strong>Telefono:</strong> ${escapeHtml(order.customer?.phone)}</div>
+              <div class="line"><strong>Direccion:</strong> ${escapeHtml(order.customer?.address)}</div>
+              ${order.notes ? `<div class="line"><strong>Notas:</strong> ${escapeHtml(order.notes)}</div>` : ""}
+            </div>
+            <div class="box">
+              <h2>Datos adicionales</h2>
+              ${customRows || '<div class="muted">Sin datos adicionales.</div>'}
+            </div>
+          </section>
+
+          <section>
+            <h2>Productos</h2>
+            <table>
+              <thead>
+                <tr>
+                  <th>Item</th>
+                  <th class="center">Cant.</th>
+                  <th class="right">Precio</th>
+                  <th class="right">Subtotal</th>
+                </tr>
+              </thead>
+              <tbody>${itemsRows}</tbody>
+              <tfoot>
+                ${
+                  (order as any).shippingMethod
+                    ? `
+                      <tr>
+                        <td colspan="3" class="right">Subtotal</td>
+                        <td class="right">${escapeHtml(formatCOP(subtotal))}</td>
+                      </tr>
+                      <tr>
+                        <td colspan="3" class="right">Envio${shippingMeta ? ` (${escapeHtml(shippingMeta.label)})` : ""}</td>
+                        <td class="right">${shippingCost > 0 ? escapeHtml(formatCOP(shippingCost)) : "Gratis"}</td>
+                      </tr>
+                    `
+                    : ""
+                }
+                <tr class="total">
+                  <td colspan="3" class="right">TOTAL</td>
+                  <td class="right">${escapeHtml(formatCOP(order.total))}</td>
+                </tr>
+              </tfoot>
+            </table>
+          </section>
+          <script>
+            window.onload = () => {
+              window.focus();
+              window.print();
+            };
+          </script>
+        </body>
+      </html>
+    `);
+    printWindow.document.close();
   };
 
   if (!storeId && loading) {
@@ -434,6 +586,14 @@ const OrdersView: React.FC = () => {
                           title="Ver detalles"
                         >
                           <i className="fa-solid fa-eye"></i>
+                        </button>
+
+                        <button
+                          onClick={() => handlePrintOrderPdf(order)}
+                          className="text-gray-400 hover:text-slate-700 p-2"
+                          title="Guardar pedido en PDF"
+                        >
+                          <i className="fa-solid fa-file-pdf"></i>
                         </button>
 
                         <a
@@ -699,6 +859,12 @@ const OrdersView: React.FC = () => {
             </div>
 
             <div className="p-6 border-t flex justify-end gap-2">
+              <button
+                onClick={() => handlePrintOrderPdf(selectedOrder)}
+                className="px-6 py-2 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 font-bold transition-all"
+              >
+                Guardar PDF
+              </button>
               <button
                 onClick={() => setSelectedOrder(null)}
                 className="px-6 py-2 bg-gray-100 text-gray-600 rounded-lg hover:bg-gray-200 font-bold transition-all"

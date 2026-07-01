@@ -669,14 +669,26 @@ const ProductsView: React.FC = () => {
         const excelId = String(row["ID"] ?? "").trim();
         const name = String(row["Nombre"] ?? "").trim();
         const skuValue = String(row["SKU"] ?? "").trim();
+        const nameKey = normalizeText(name);
+        const skuKey = normalizeText(skuValue);
 
-        if (!name) {
-          skipped++;
-          continue;
-        }
+        // Prioridad para relacionar:
+        // 1. ID exacto del producto
+        // 2. SKU
+        // 3. Nombre normalizado
+        const existingByExcelId = excelId ? existingById.get(excelId) : null;
+        const existingBySkuValue = skuKey ? existingBySku.get(skuKey) : null;
+        const existingByNameValue = nameKey ? existingByName.get(nameKey) : null;
+
+        const existingProduct =
+          existingByExcelId || existingBySkuValue || existingByNameValue;
+        const isUpdatingExistingProduct = Boolean(existingProduct);
 
         const priceRaw = row["Precio"];
         const priceFormattedRaw = row["Precio formateado"];
+        const hasPriceValue =
+          String(priceRaw ?? "").trim() !== "" ||
+          String(priceFormattedRaw ?? "").trim() !== "";
         const price = parseNumberSafe(priceRaw || priceFormattedRaw);
         const wholesalePriceRaw = row["Precio mayorista"];
         const hasWholesalePrice = String(wholesalePriceRaw ?? "").trim() !== "";
@@ -717,8 +729,24 @@ const ProductsView: React.FC = () => {
           }
         }
 
+        if (
+          !isUpdatingExistingProduct &&
+          (!name || !finalCategoryId || !hasPriceValue || price <= 0)
+        ) {
+          skipped++;
+          continue;
+        }
+
+        if (isUpdatingExistingProduct && hasPriceValue && price <= 0) {
+          skipped++;
+          continue;
+        }
+
         const discountTypeRaw = String(row["Tipo descuento"] ?? "").trim();
+        const discountValueRaw = row["Valor descuento"];
         const discountValue = parseNumberSafe(row["Valor descuento"]);
+        const hasDiscountValue =
+          discountTypeRaw !== "" || String(discountValueRaw ?? "").trim() !== "";
 
         const discount =
           discountTypeRaw && discountValue > 0
@@ -778,36 +806,35 @@ const ProductsView: React.FC = () => {
           optionalImportFields.allowsCashOnDelivery = parseBooleanFromExcel(cashOnDeliveryRaw);
         }
 
-        const payload = {
-          name,
-          sku: skuValue || null,
-          description: htmlToPlainText(row["Descripción"]),
-          price,
-          discount,
-          categoryId: finalCategoryId,
-          images,
-          videos,
-          options,
-          variants,
-          isActive: isActiveValue,
-          order: rowOrder,
+        const hasDescriptionValue = String(row["Descripción"] ?? "").trim() !== "";
+        const hasImagesValue = imagesUrls.length > 0 || imagesMeta.some(Boolean);
+        const hasVideosValue = videosUrls.length > 0 || videosPaths.some(Boolean);
+        const hasVariantsValue = String(row["Variantes"] ?? "").trim() !== "";
+        const hasOptionsValue = String(row["Opciones"] ?? "").trim() !== "";
+
+        const payload: Record<string, any> = {
           ...optionalImportFields,
           updatedAt: serverTimestamp(),
         };
 
-        const nameKey = normalizeText(name);
-        const skuKey = normalizeText(skuValue);
-
-        // Prioridad para relacionar:
-        // 1. ID exacto del producto
-        // 2. SKU
-        // 3. Nombre normalizado
-        const existingByExcelId = excelId ? existingById.get(excelId) : null;
-        const existingBySkuValue = skuKey ? existingBySku.get(skuKey) : null;
-        const existingByNameValue = nameKey ? existingByName.get(nameKey) : null;
-
-        const existingProduct =
-          existingByExcelId || existingBySkuValue || existingByNameValue;
+        if (name || !isUpdatingExistingProduct) payload.name = name;
+        if (skuValue || !isUpdatingExistingProduct) payload.sku = skuValue || null;
+        if (hasDescriptionValue || !isUpdatingExistingProduct) {
+          payload.description = htmlToPlainText(row["Descripción"]);
+        }
+        if (hasPriceValue || !isUpdatingExistingProduct) payload.price = price;
+        if (hasDiscountValue || !isUpdatingExistingProduct) payload.discount = discount;
+        if (finalCategoryId || !isUpdatingExistingProduct) payload.categoryId = finalCategoryId;
+        if (hasImagesValue || !isUpdatingExistingProduct) payload.images = images;
+        if (hasVideosValue || !isUpdatingExistingProduct) payload.videos = videos;
+        if (hasOptionsValue || !isUpdatingExistingProduct) payload.options = options;
+        if (hasVariantsValue || !isUpdatingExistingProduct) payload.variants = variants;
+        if (hasIsActiveValue || !isUpdatingExistingProduct) payload.isActive = isActiveValue;
+        if (row["Orden"] !== undefined && String(row["Orden"] ?? "").trim() !== "") {
+          payload.order = parseNumberSafe(row["Orden"]);
+        } else if (!isUpdatingExistingProduct) {
+          payload.order = rowOrder;
+        }
 
         if (existingProduct) {
           await updateDoc(
@@ -830,16 +857,22 @@ const ProductsView: React.FC = () => {
         }
       }
 
-      const productsNotInExcel = existingProducts.filter((p) => !importedProductIds.has(p.id));
-      for (let start = 0; start < productsNotInExcel.length; start += 450) {
-        const batch = writeBatch(db);
-        productsNotInExcel.slice(start, start + 450).forEach((product, index) => {
-          batch.update(doc(db, "stores", storeId, "products", product.id), {
-            order: rows.length + start + index,
-            updatedAt: serverTimestamp(),
+      const shouldReorderMissingProducts =
+        rows.length >= existingProducts.length &&
+        rows.some((row) => String(row["Orden"] ?? "").trim() !== "");
+
+      if (shouldReorderMissingProducts) {
+        const productsNotInExcel = existingProducts.filter((p) => !importedProductIds.has(p.id));
+        for (let start = 0; start < productsNotInExcel.length; start += 450) {
+          const batch = writeBatch(db);
+          productsNotInExcel.slice(start, start + 450).forEach((product, index) => {
+            batch.update(doc(db, "stores", storeId, "products", product.id), {
+              order: rows.length + start + index,
+              updatedAt: serverTimestamp(),
+            });
           });
-        });
-        await batch.commit();
+          await batch.commit();
+        }
       }
 
       await loadFirstPage();
