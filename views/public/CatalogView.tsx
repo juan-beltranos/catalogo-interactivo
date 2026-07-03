@@ -15,6 +15,12 @@ import {
   getDocs,
   where,
   limit,
+  startAfter,
+  startAt,
+  endAt,
+  QueryConstraint,
+  QueryDocumentSnapshot,
+  DocumentData,
   doc,
   runTransaction,
   increment,
@@ -44,7 +50,7 @@ const PAGE_SIZE = 20;
 
 type PageCache = {
   products: Product[];
-  allProducts: Product[];
+  lastDoc: QueryDocumentSnapshot<DocumentData> | null;
   hasMore: boolean;
 };
 const catalogCache = new Map<string, Map<string, PageCache>>();
@@ -66,7 +72,7 @@ const setCategoryCache = (
 const clearStoreCache = (storeId: string) => {
   catalogCache.delete(storeId);
 };
-const allProductsCache = new Map<string, Product[]>();
+const searchProductsCache = new Map<string, Product[]>();
 
 // ── Helpers de envío ──────────────────────────────────────────────────────────
 
@@ -352,8 +358,8 @@ const CatalogView: React.FC = () => {
   const [loadingMore, setLoadingMore] = useState(false);
   const [hasMore, setHasMore] = useState(false);
 
-  const [allProducts, setAllProducts] = useState<Product[]>([]);
-  const [allLoaded, setAllLoaded] = useState(false);
+  const [searchProducts, setSearchProducts] = useState<Product[]>([]);
+  const [searchLoaded, setSearchLoaded] = useState(false);
   const [searchLoading, setSearchLoading] = useState(false);
   const [locationTooltipOpen, setLocationTooltipOpen] = useState(false);
 
@@ -438,7 +444,7 @@ const CatalogView: React.FC = () => {
 
   const filteredProducts = useMemo(() => {
     const q = norm(search);
-    const source = q ? allProducts : products;
+    const source = q ? searchProducts : products;
     const visible = source.filter((p) => p.isActive !== false);
     if (!q) {
       return activeCategoryId === "all"
@@ -456,7 +462,7 @@ const CatalogView: React.FC = () => {
       );
       return haystack.includes(q);
     });
-  }, [search, allProducts, products, activeCategoryId, categoryNameById]);
+  }, [search, searchProducts, products, activeCategoryId, categoryNameById]);
 
   useEffect(() => {
     if (!cartStorageId) return;
@@ -491,8 +497,8 @@ const CatalogView: React.FC = () => {
       setCatalogUnavailableReason(null);
       setProducts([]);
       setCategories([]);
-      setAllProducts([]);
-      setAllLoaded(false);
+      setSearchProducts([]);
+      setSearchLoaded(false);
       setQueryError(null);
 
       try {
@@ -556,42 +562,74 @@ const CatalogView: React.FC = () => {
     setActiveCategoryId(exists ? categoryFromUrl : "all");
   }, [categories, categoryFromUrl]);
 
-  const fetchAllProductsOnce = useCallback(async (storeId: string) => {
-    if (allProductsCache.has(storeId)) {
-      setAllProducts(allProductsCache.get(storeId)!);
-      setAllLoaded(true);
+  const fetchSearchProducts = useCallback(async (storeId: string) => {
+    const term = search.trim();
+    if (!term) {
+      setSearchProducts([]);
+      setSearchLoaded(false);
+      return;
+    }
+
+    const cacheKey = `${storeId}:${activeCategoryId}:${norm(term)}`;
+    if (searchProductsCache.has(cacheKey)) {
+      setSearchProducts(searchProductsCache.get(cacheKey)!);
+      setSearchLoaded(true);
       return;
     }
     setSearchLoading(true);
+    setSearchLoaded(false);
     setQueryError(null);
     try {
       const baseRef = collection(db, "stores", storeId, "products");
-      const snap = await getDocs(baseRef);
-      const acc = snap.docs.map((d) => ({
+      const snap = await getDocs(
+        query(
+          baseRef,
+          orderBy("name"),
+          startAt(term),
+          endAt(`${term}\uf8ff`),
+          limit(60),
+        ),
+      );
+      const acc = [...(snap.docs.map((d) => ({
         id: d.id,
         ...(d.data() as any),
-      })) as Product[];
-      const sorted = sortProducts(acc);
-      allProductsCache.set(storeId, sorted);
-      setAllProducts(sorted);
-      setAllLoaded(true);
+      })) as Product[]), ...products];
+      const seen = new Map<string, Product>();
+      acc
+        .filter((p) => p.isActive !== false)
+        .filter((p) => activeCategoryId === "all" || p.categoryId === activeCategoryId)
+        .filter((p) => {
+          const catName = categoryNameById.get(p.categoryId) || "";
+          return norm(`${p.name} ${p.sku ?? ""} ${p.description ?? ""} ${catName}`).includes(norm(term));
+        })
+        .forEach((p) => seen.set(p.id, p));
+      const sorted = sortProducts(Array.from(seen.values())).slice(0, 60);
+      searchProductsCache.set(cacheKey, sorted);
+      setSearchProducts(sorted);
+      setSearchLoaded(true);
     } catch (e: any) {
-      console.error("fetchAllProductsOnce error:", e);
+      console.error("fetchSearchProducts error:", e);
       setQueryError(
         "Error cargando productos para búsqueda. Revisa la consola.",
       );
+      setSearchProducts([]);
+      setSearchLoaded(true);
     } finally {
       setSearchLoading(false);
     }
-  }, []);
+  }, [activeCategoryId, categoryNameById, products, search]);
 
   const storeIdRef = useRef<string | null>(null);
   useEffect(() => {
     if (!store || catalogUnavailableReason) return;
     storeIdRef.current = store.id;
-    if (!isSearching) return;
-    fetchAllProductsOnce(store.id);
-  }, [store?.id, catalogUnavailableReason, isSearching, fetchAllProductsOnce]);
+    if (!isSearching) {
+      setSearchProducts([]);
+      setSearchLoaded(false);
+      return;
+    }
+    fetchSearchProducts(store.id);
+  }, [store?.id, catalogUnavailableReason, isSearching, fetchSearchProducts]);
 
   const fetchFirstPage = useCallback(
     async (storeId: string, categoryId: string) => {
@@ -604,24 +642,27 @@ const CatalogView: React.FC = () => {
       }
       setLoading(true);
       setQueryError(null);
+      const baseRef = collection(db, "stores", storeId, "products");
       try {
-        const baseRef = collection(db, "stores", storeId, "products");
-        const constraints: any[] = [];
+        const constraints: QueryConstraint[] = [];
         if (categoryId !== "all")
           constraints.push(where("categoryId", "==", categoryId));
-        const qProds = query(baseRef, ...constraints);
+        const qProds = query(
+          baseRef,
+          ...constraints,
+          orderBy("order", "asc"),
+          limit(PAGE_SIZE + 1),
+        );
         const snap = await getDocs(qProds);
-        const sortedProducts = sortProducts(
-          snap.docs.map((d) => ({
+        const pageDocs = snap.docs.slice(0, PAGE_SIZE);
+        const pageProducts = pageDocs.map((d) => ({
             id: d.id,
             ...(d.data() as any),
-          })) as Product[],
-        );
-        const pageProducts = sortedProducts.slice(0, PAGE_SIZE);
-        const more = sortedProducts.length > PAGE_SIZE;
+          })) as Product[];
+        const more = snap.docs.length > PAGE_SIZE;
         setCategoryCache(storeId, categoryId, {
           products: pageProducts,
-          allProducts: sortedProducts,
+          lastDoc: pageDocs[pageDocs.length - 1] ?? null,
           hasMore: more,
         });
         setProducts(pageProducts);
@@ -653,17 +694,38 @@ const CatalogView: React.FC = () => {
         await fetchFirstPage(store.id, activeCategoryId);
         return;
       }
+      if (!cached.lastDoc) {
+        setHasMore(false);
+        return;
+      }
+      const baseRef = collection(db, "stores", store.id, "products");
+      const constraints: QueryConstraint[] = [];
+      if (activeCategoryId !== "all")
+        constraints.push(where("categoryId", "==", activeCategoryId));
+      const qProds = query(
+        baseRef,
+        ...constraints,
+        orderBy("order", "asc"),
+        startAfter(cached.lastDoc),
+        limit(PAGE_SIZE + 1),
+      );
+      const snap = await getDocs(qProds);
+      const pageDocs = snap.docs.slice(0, PAGE_SIZE);
+      const pageProducts = pageDocs.map((d) => ({
+        id: d.id,
+        ...(d.data() as any),
+      })) as Product[];
+      const more = snap.docs.length > PAGE_SIZE;
       setProducts((prev) => {
-        const nextProducts = cached.allProducts.slice(0, prev.length + PAGE_SIZE);
-        const more = cached.allProducts.length > nextProducts.length;
+        const nextProducts = [...prev, ...pageProducts];
         setCategoryCache(store.id, activeCategoryId, {
           products: nextProducts,
-          allProducts: cached.allProducts,
+          lastDoc: pageDocs[pageDocs.length - 1] ?? cached.lastDoc,
           hasMore: more,
         });
-        setHasMore(more);
         return nextProducts;
       });
+      setHasMore(more);
     } catch (e: any) {
       console.error("fetchMorePage error:", e);
       const msg = String(e?.message || "")
@@ -682,17 +744,8 @@ const CatalogView: React.FC = () => {
     fetchFirstPage(store.id, activeCategoryId);
   }, [store?.id, catalogUnavailableReason, activeCategoryId, fetchFirstPage]);
 
-  useEffect(() => {
-    if (!store || catalogUnavailableReason) return;
-    const cached = allProductsCache.get(store.id);
-    if (cached) {
-      setAllProducts(cached);
-      setAllLoaded(true);
-    }
-  }, [store?.id, catalogUnavailableReason]);
-
   const getCartItemMaxStock = (item: CartItem) => {
-    const prod = [...products, ...allProducts].find((p) => p.id === item.productId);
+    const prod = [...products, ...searchProducts].find((p) => p.id === item.productId);
     const v = prod?.variants?.find((vv) => vv.id === item.variantId);
     return v && typeof v.stock === "number" ? v.stock : undefined;
   };
@@ -1308,9 +1361,9 @@ const CatalogView: React.FC = () => {
           ) : null}
         </div>
 
-        {isSearching && !allLoaded ? (
+        {isSearching && !searchLoaded ? (
           <div className="text-sm text-gray-500">
-            {searchLoading ? "Preparando búsqueda..." : "Cargando productos..."}
+            {searchLoading ? "Buscando productos..." : "Preparando búsqueda..."}
           </div>
         ) : null}
 
