@@ -15,12 +15,9 @@ import {
   getDocs,
   where,
   limit,
-  startAfter,
   startAt,
   endAt,
   QueryConstraint,
-  QueryDocumentSnapshot,
-  DocumentData,
   doc,
   runTransaction,
   increment,
@@ -49,8 +46,8 @@ import {
 const PAGE_SIZE = 20;
 
 type PageCache = {
+  allProducts: Product[];
   products: Product[];
-  lastDoc: QueryDocumentSnapshot<DocumentData> | null;
   hasMore: boolean;
 };
 const catalogCache = new Map<string, Map<string, PageCache>>();
@@ -442,6 +439,18 @@ const CatalogView: React.FC = () => {
     });
   };
 
+  const sortCategories = (items: Category[]) => {
+    return [...items].sort((a: any, b: any) => {
+      const aHasOrder = typeof a.order === "number";
+      const bHasOrder = typeof b.order === "number";
+
+      if (aHasOrder && bHasOrder) return a.order - b.order;
+      if (aHasOrder) return -1;
+      if (bHasOrder) return 1;
+      return String(a.name || "").localeCompare(String(b.name || ""));
+    });
+  };
+
   const filteredProducts = useMemo(() => {
     const q = norm(search);
     const source = q ? searchProducts : products;
@@ -542,12 +551,9 @@ const CatalogView: React.FC = () => {
 
   useEffect(() => {
     if (!store || catalogUnavailableReason) return;
-    const qCats = query(
-      collection(db, "stores", store.id, "categories"),
-      orderBy("order", "asc"),
-    );
+    const qCats = query(collection(db, "stores", store.id, "categories"));
     const unsubscribeCats = onSnapshot(qCats, (snap) => {
-      setCategories(snap.docs.map((d) => ({ id: d.id, ...(d.data() as any) })));
+      setCategories(sortCategories(snap.docs.map((d) => ({ id: d.id, ...(d.data() as any) }))));
     });
     return () => unsubscribeCats();
   }, [store, catalogUnavailableReason]);
@@ -647,22 +653,17 @@ const CatalogView: React.FC = () => {
         const constraints: QueryConstraint[] = [];
         if (categoryId !== "all")
           constraints.push(where("categoryId", "==", categoryId));
-        const qProds = query(
-          baseRef,
-          ...constraints,
-          orderBy("order", "asc"),
-          limit(PAGE_SIZE + 1),
-        );
+        const qProds = query(baseRef, ...constraints);
         const snap = await getDocs(qProds);
-        const pageDocs = snap.docs.slice(0, PAGE_SIZE);
-        const pageProducts = pageDocs.map((d) => ({
+        const allProducts = sortProducts(snap.docs.map((d) => ({
             id: d.id,
             ...(d.data() as any),
-          })) as Product[];
-        const more = snap.docs.length > PAGE_SIZE;
+          })) as Product[]);
+        const pageProducts = allProducts.slice(0, PAGE_SIZE);
+        const more = allProducts.length > PAGE_SIZE;
         setCategoryCache(storeId, categoryId, {
+          allProducts,
           products: pageProducts,
-          lastDoc: pageDocs[pageDocs.length - 1] ?? null,
           hasMore: more,
         });
         setProducts(pageProducts);
@@ -694,36 +695,26 @@ const CatalogView: React.FC = () => {
         await fetchFirstPage(store.id, activeCategoryId);
         return;
       }
-      if (!cached.lastDoc) {
+      const pageProducts = cached.allProducts.slice(
+        cached.products.length,
+        cached.products.length + PAGE_SIZE,
+      );
+      if (!pageProducts.length) {
         setHasMore(false);
         return;
       }
-      const baseRef = collection(db, "stores", store.id, "products");
-      const constraints: QueryConstraint[] = [];
-      if (activeCategoryId !== "all")
-        constraints.push(where("categoryId", "==", activeCategoryId));
-      const qProds = query(
-        baseRef,
-        ...constraints,
-        orderBy("order", "asc"),
-        startAfter(cached.lastDoc),
-        limit(PAGE_SIZE + 1),
-      );
-      const snap = await getDocs(qProds);
-      const pageDocs = snap.docs.slice(0, PAGE_SIZE);
-      const pageProducts = pageDocs.map((d) => ({
-        id: d.id,
-        ...(d.data() as any),
-      })) as Product[];
-      const more = snap.docs.length > PAGE_SIZE;
+      const nextProducts = [...cached.products, ...pageProducts];
+      const more = nextProducts.length < cached.allProducts.length;
       setProducts((prev) => {
-        const nextProducts = [...prev, ...pageProducts];
+        const visibleProducts = prev.length === cached.products.length
+          ? nextProducts
+          : [...prev, ...pageProducts];
         setCategoryCache(store.id, activeCategoryId, {
-          products: nextProducts,
-          lastDoc: pageDocs[pageDocs.length - 1] ?? cached.lastDoc,
+          allProducts: cached.allProducts,
+          products: visibleProducts,
           hasMore: more,
         });
-        return nextProducts;
+        return visibleProducts;
       });
       setHasMore(more);
     } catch (e: any) {
