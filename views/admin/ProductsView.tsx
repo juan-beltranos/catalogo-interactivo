@@ -9,14 +9,9 @@ import {
   orderBy,
   onSnapshot,
   serverTimestamp,
-  where,
   getDocs,
   QueryDocumentSnapshot,
   DocumentData,
-  startAfter,
-  endBefore,
-  limit,
-  limitToLast,
   getCountFromServer,
   writeBatch,
 } from "firebase/firestore";
@@ -64,12 +59,37 @@ const FREE_MAX_VIDEOS = 0;
 const PRO_MAX_IMAGES = 5;
 const PRO_MAX_VIDEOS = 1;
 
+const getProductOrderValue = (product: Product) =>
+  typeof product.order === "number" && Number.isFinite(product.order)
+    ? product.order
+    : Number.MAX_SAFE_INTEGER;
+
+const getProductCreatedAtMillis = (product: Product) => {
+  const createdAt = product.createdAt;
+  if (createdAt && typeof createdAt.toMillis === "function") return createdAt.toMillis();
+  if (createdAt instanceof Date) return createdAt.getTime();
+  if (typeof createdAt === "number") return createdAt;
+  return 0;
+};
+
+const sortProductsForAdmin = (items: Product[]) =>
+  [...items].sort((a, b) => {
+    const orderA = getProductOrderValue(a);
+    const orderB = getProductOrderValue(b);
+    if (orderA !== orderB) return orderA - orderB;
+
+    const createdAtA = getProductCreatedAtMillis(a);
+    const createdAtB = getProductCreatedAtMillis(b);
+    if (createdAtA !== createdAtB) return createdAtB - createdAtA;
+
+    return String(a.name || "").localeCompare(String(b.name || ""));
+  });
+
 type PageCache = {
   storeId: string;
   products: Product[];
-  firstDoc: QueryDocumentSnapshot<DocumentData> | null;
-  lastDoc: QueryDocumentSnapshot<DocumentData> | null;
   hasNext: boolean;
+  page: number;
 };
 let pageCache: PageCache | null = null;
 
@@ -206,10 +226,6 @@ const ProductsView: React.FC = () => {
   const [hasNext, setHasNext] = useState(false);
   const [loadingPage, setLoadingPage] = useState(false);
 
-  const [pageFirstDoc, setPageFirstDoc] = useState<QueryDocumentSnapshot<DocumentData> | null>(null);
-  const [pageLastDoc, setPageLastDoc] = useState<QueryDocumentSnapshot<DocumentData> | null>(null);
-  const [history, setHistory] = useState<QueryDocumentSnapshot<DocumentData>[]>([]);
-
   // ── Drag & drop state ────────────────────────────────────────────────────
   const [savingOrder, setSavingOrder] = useState(false);
   const [exportingExcel, setExportingExcel] = useState(false);
@@ -313,6 +329,7 @@ const ProductsView: React.FC = () => {
         isActive: data.isActive ?? true,
         allowsCashOnDelivery: data.allowsCashOnDelivery ?? true,
         order: data.order ?? null,
+        createdAt: data.createdAt ?? null,
       };
     },
     []
@@ -329,8 +346,7 @@ const ProductsView: React.FC = () => {
     if (pageCache && pageCache.storeId === storeId) {
       setProducts(pageCache.products);
       setHasNext(pageCache.hasNext);
-      setPageFirstDoc(pageCache.firstDoc);
-      setPageLastDoc(pageCache.lastDoc);
+      setPage(pageCache.page);
       setLoading(false);
     } else {
       setLoading(true);
@@ -358,8 +374,8 @@ const ProductsView: React.FC = () => {
     }
     setSearching(true);
     try {
-      const snap = await getDocs(query(prodsRef, orderBy("order", "asc")));
-      const all = snap.docs.map(mapDocToProduct);
+      const snap = await getDocs(prodsRef);
+      const all = sortProductsForAdmin(snap.docs.map(mapDocToProduct));
       allProductsCache.set(storeId, all);
       setAllProducts(all);
       setAllLoaded(true);
@@ -374,8 +390,8 @@ const ProductsView: React.FC = () => {
   const reloadAllProducts = useCallback(async () => {
     if (!prodsRef || !storeId) return;
     try {
-      const snap = await getDocs(query(prodsRef, orderBy("order", "asc")));
-      const all = snap.docs.map(mapDocToProduct);
+      const snap = await getDocs(prodsRef);
+      const all = sortProductsForAdmin(snap.docs.map(mapDocToProduct));
       allProductsCache.set(storeId, all);
       setAllProducts(all);
       setAllLoaded(true);
@@ -409,18 +425,8 @@ const ProductsView: React.FC = () => {
     setExportingExcel(true);
 
     try {
-      const snap = await getDocs(query(prodsRef, orderBy("createdAt", "desc")));
-      const exportedProducts = snap.docs.map(mapDocToProduct);
-
-      // Respeta el orden manual cuando existe.
-      exportedProducts.sort((a, b) => {
-        const orderA = typeof a.order === "number" ? a.order : Number.MAX_SAFE_INTEGER;
-        const orderB = typeof b.order === "number" ? b.order : Number.MAX_SAFE_INTEGER;
-
-        if (orderA !== orderB) return orderA - orderB;
-
-        return String(a.name || "").localeCompare(String(b.name || ""));
-      });
+      const snap = await getDocs(prodsRef);
+      const exportedProducts = sortProductsForAdmin(snap.docs.map(mapDocToProduct));
 
       const categoryMap = new Map(categories.map((cat) => [cat.id, cat.name]));
 
@@ -978,64 +984,45 @@ const ProductsView: React.FC = () => {
   // ── loadPage: usa el mismo orden que el catálogo público ──
   const loadPage = useCallback(
     async (
-      mode: "first" | "next" | "prev",
-      firstDoc?: QueryDocumentSnapshot<DocumentData> | null,
-      lastDoc?: QueryDocumentSnapshot<DocumentData> | null
+      mode: "first" | "next" | "prev"
     ) => {
       if (!prodsRef || !storeId) return;
       setLoadingPage(true);
       try {
-        let qBase = query(prodsRef, orderBy("order", "asc"));
-
-        if (mode === "next" && lastDoc) {
-          qBase = query(qBase, startAfter(lastDoc), limit(PAGE_SIZE + 1));
-        } else if (mode === "prev" && firstDoc) {
-          qBase = query(qBase, endBefore(firstDoc), limitToLast(PAGE_SIZE + 1));
-        } else {
-          qBase = query(qBase, limit(PAGE_SIZE + 1));
-        }
-
-        const snap = await getDocs(qBase);
-        const docs = snap.docs;
-        const nextExists = docs.length > PAGE_SIZE;
-        const pageDocs = nextExists ? docs.slice(0, PAGE_SIZE) : docs;
-        const pageProducts = pageDocs.map(mapDocToProduct);
-        const newFirstDoc = pageDocs[0] ?? null;
-        const newLastDoc = pageDocs[pageDocs.length - 1] ?? null;
+        const targetPage =
+          mode === "first" ? 1 : mode === "next" ? page + 1 : Math.max(1, page - 1);
+        const snap = await getDocs(prodsRef);
+        const sortedProducts = sortProductsForAdmin(snap.docs.map(mapDocToProduct));
+        const start = (targetPage - 1) * PAGE_SIZE;
+        const pageProducts = sortedProducts.slice(start, start + PAGE_SIZE);
+        const nextExists = sortedProducts.length > start + PAGE_SIZE;
 
         setProducts(pageProducts);
         setHasNext(nextExists);
-        setPageFirstDoc(newFirstDoc);
-        setPageLastDoc(newLastDoc);
+        setPage(targetPage);
 
-        pageCache = { storeId, products: pageProducts, firstDoc: newFirstDoc, lastDoc: newLastDoc, hasNext: nextExists };
+        pageCache = { storeId, products: pageProducts, hasNext: nextExists, page: targetPage };
       } finally {
         setLoadingPage(false);
         setLoading(false);
       }
     },
-    [prodsRef, storeId, mapDocToProduct]
+    [prodsRef, storeId, mapDocToProduct, page]
   );
 
   const loadFirstPage = useCallback(async () => {
-    setPage(1);
-    setHistory([]);
     await loadPage("first");
   }, [loadPage]);
 
   const goNext = useCallback(async () => {
     if (!hasNext || loadingPage) return;
-    if (pageFirstDoc) setHistory((h) => [...h, pageFirstDoc]);
-    setPage((p) => p + 1);
-    await loadPage("next", pageFirstDoc, pageLastDoc);
-  }, [hasNext, loadingPage, pageFirstDoc, pageLastDoc, loadPage]);
+    await loadPage("next");
+  }, [hasNext, loadingPage, loadPage]);
 
   const goPrev = useCallback(async () => {
-    if (history.length === 0 || loadingPage) return;
-    setHistory((h) => h.slice(0, -1));
-    setPage((p) => Math.max(1, p - 1));
-    await loadPage("prev", pageFirstDoc, pageLastDoc);
-  }, [history, loadingPage, pageFirstDoc, pageLastDoc, loadPage]);
+    if (page <= 1 || loadingPage) return;
+    await loadPage("prev");
+  }, [page, loadingPage, loadPage]);
 
   // ── Drag & drop handlers ─────────────────────────────────────────────────
   const sensors = useSensors(
@@ -1207,9 +1194,6 @@ const ProductsView: React.FC = () => {
       setAllLoaded(false);
       setSearchResults([]);
       setHasNext(false);
-      setPageFirstDoc(null);
-      setPageLastDoc(null);
-      setHistory([]);
       setPage(1);
       alert(`Se eliminaron ${snapshot.docs.length} producto(s).`);
     } catch (err) {
@@ -1829,7 +1813,7 @@ const ProductsView: React.FC = () => {
               </table>
 
               {!search ? (
-                <Paginator page={page} hasNext={hasNext} hasPrev={history.length > 0} loading={loadingPage} onNext={goNext} onPrev={goPrev} />
+                <Paginator page={page} hasNext={hasNext} hasPrev={page > 1} loading={loadingPage} onNext={goNext} onPrev={goPrev} />
               ) : null}
             </div>
           )}
