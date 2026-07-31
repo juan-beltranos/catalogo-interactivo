@@ -15,8 +15,6 @@ import {
   getDocs,
   where,
   limit,
-  startAt,
-  endAt,
   QueryConstraint,
   doc,
   runTransaction,
@@ -70,6 +68,30 @@ const clearStoreCache = (storeId: string) => {
   catalogCache.delete(storeId);
 };
 const searchProductsCache = new Map<string, Product[]>();
+const searchProductCorpusCache = new Map<string, Product[]>();
+const searchProductCorpusRequests = new Map<string, Promise<Product[]>>();
+
+const loadSearchProductCorpus = (storeId: string): Promise<Product[]> => {
+  const cached = searchProductCorpusCache.get(storeId);
+  if (cached) return Promise.resolve(cached);
+
+  const pending = searchProductCorpusRequests.get(storeId);
+  if (pending) return pending;
+
+  const request = getDocs(collection(db, "stores", storeId, "products"))
+    .then((snap) => {
+      const products = snap.docs.map((d) => ({
+        id: d.id,
+        ...(d.data() as any),
+      })) as Product[];
+      searchProductCorpusCache.set(storeId, products);
+      return products;
+    })
+    .finally(() => searchProductCorpusRequests.delete(storeId));
+
+  searchProductCorpusRequests.set(storeId, request);
+  return request;
+};
 
 // ── Helpers de envío ──────────────────────────────────────────────────────────
 
@@ -453,6 +475,7 @@ const CatalogView: React.FC = () => {
 
   const filteredProducts = useMemo(() => {
     const q = norm(search);
+    const parts = q.split(/\s+/).filter(Boolean);
     const source = q ? searchProducts : products;
     const visible = source.filter((p) => p.isActive !== false);
     if (!q) {
@@ -469,7 +492,7 @@ const CatalogView: React.FC = () => {
       const haystack = norm(
         `${p.name} ${p.sku ?? ""} ${p.description ?? ""} ${catName} ${variantsText} ${priceText}`,
       );
-      return haystack.includes(q);
+      return parts.every((part) => haystack.includes(part));
     });
   }, [search, searchProducts, products, activeCategoryId, categoryNameById]);
 
@@ -586,30 +609,24 @@ const CatalogView: React.FC = () => {
     setSearchLoaded(false);
     setQueryError(null);
     try {
-      const baseRef = collection(db, "stores", storeId, "products");
-      const snap = await getDocs(
-        query(
-          baseRef,
-          orderBy("name"),
-          startAt(term),
-          endAt(`${term}\uf8ff`),
-          limit(60),
-        ),
-      );
-      const acc = [...(snap.docs.map((d) => ({
-        id: d.id,
-        ...(d.data() as any),
-      })) as Product[]), ...products];
+      const allProducts = await loadSearchProductCorpus(storeId);
+      const parts = norm(term).split(/\s+/).filter(Boolean);
       const seen = new Map<string, Product>();
-      acc
+      allProducts
         .filter((p) => p.isActive !== false)
         .filter((p) => activeCategoryId === "all" || p.categoryId === activeCategoryId)
         .filter((p) => {
           const catName = categoryNameById.get(p.categoryId) || "";
-          return norm(`${p.name} ${p.sku ?? ""} ${p.description ?? ""} ${catName}`).includes(norm(term));
+          const variantsText = (p.variants || [])
+            .map((v: any) => `${v.title ?? ""} ${v.sku ?? ""}`)
+            .join(" ");
+          const haystack = norm(
+            `${p.name ?? ""} ${p.sku ?? ""} ${p.description ?? ""} ${catName} ${variantsText}`,
+          );
+          return parts.every((part) => haystack.includes(part));
         })
         .forEach((p) => seen.set(p.id, p));
-      const sorted = sortProducts(Array.from(seen.values())).slice(0, 60);
+      const sorted = sortProducts(Array.from(seen.values()));
       searchProductsCache.set(cacheKey, sorted);
       setSearchProducts(sorted);
       setSearchLoaded(true);
@@ -623,7 +640,7 @@ const CatalogView: React.FC = () => {
     } finally {
       setSearchLoading(false);
     }
-  }, [activeCategoryId, categoryNameById, products, search]);
+  }, [activeCategoryId, categoryNameById, search]);
 
   const storeIdRef = useRef<string | null>(null);
   useEffect(() => {
