@@ -101,6 +101,8 @@ const SettingsView: React.FC = () => {
     const [shippingCostCarrier, setShippingCostCarrier] = useState("0");
     const [shippingNote, setShippingNote] = useState("");
     const [shippingHidePrices, setShippingHidePrices] = useState(false);
+    const [shippingFreeEnabled, setShippingFreeEnabled] = useState(false);
+    const [shippingFreeFrom, setShippingFreeFrom] = useState("50000");
     const [checkoutFields, setCheckoutFields] = useState<CheckoutFieldConfig[]>([]);
 
     // cargar tienda
@@ -153,6 +155,8 @@ const SettingsView: React.FC = () => {
             setShippingCostCarrier(String(data.shippingCostCarrier ?? 0));
             setShippingNote(data.shippingNote ?? "");
             setShippingHidePrices(data.shippingHidePrices ?? false);
+            setShippingFreeEnabled(data.shippingFreeEnabled ?? false);
+            setShippingFreeFrom(String(data.shippingFreeFrom ?? 50000));
             setCheckoutFields(normalizeCheckoutFields(data.checkoutFields ?? []));
 
             setLoading(false);
@@ -308,6 +312,11 @@ const SettingsView: React.FC = () => {
             return;
         }
 
+        if (shippingFreeEnabled && (!Number.isFinite(Number(shippingFreeFrom)) || Number(shippingFreeFrom) <= 0)) {
+            setError("Ingresa un monto mayor a 0 para ofrecer envío gratis.");
+            return;
+        }
+
         setSaving(true);
         setError("");
 
@@ -345,6 +354,8 @@ const SettingsView: React.FC = () => {
                 shippingCostCarrier: Number(shippingCostCarrier) || 0,
                 shippingNote: shippingNote.trim(),
                 shippingHidePrices,
+                shippingFreeEnabled,
+                shippingFreeFrom: Math.max(0, Number(shippingFreeFrom) || 0),
                 checkoutFields: normalizeCheckoutFields(checkoutFields),
                 ...logoPayload,
                 ...bannerPayload,
@@ -810,6 +821,32 @@ const SettingsView: React.FC = () => {
                         </div>
 
                         {/* Nota de envío */}
+                        {!shippingHidePrices && (
+                            <div className="rounded-xl border border-gray-200 bg-gray-50 p-4 space-y-3">
+                                <label className="flex items-start gap-3 cursor-pointer select-none group">
+                                    <div className="relative mt-0.5">
+                                        <input type="checkbox" className="sr-only" checked={shippingFreeEnabled} onChange={(e) => setShippingFreeEnabled(e.target.checked)} />
+                                        <div className={`h-5 w-5 rounded border-2 flex items-center justify-center transition-colors ${shippingFreeEnabled ? "bg-indigo-600 border-indigo-600" : "bg-white border-gray-300 group-hover:border-indigo-400"}`}>
+                                            {shippingFreeEnabled && <i className="fa-solid fa-check text-white text-[10px]" />}
+                                        </div>
+                                    </div>
+                                    <div>
+                                        <span className="text-sm font-semibold text-gray-700">Ofrecer envío gratis por monto mínimo</span>
+                                        <p className="text-xs text-gray-400 mt-0.5">Se aplicará automáticamente cuando el subtotal alcance el valor indicado.</p>
+                                    </div>
+                                </label>
+                                {shippingFreeEnabled && (
+                                    <div>
+                                        <label className="text-xs font-semibold text-gray-600">Envío gratis a partir de</label>
+                                        <div className="flex items-center border rounded-lg overflow-hidden bg-white mt-1.5">
+                                            <span className="px-3 py-2 bg-gray-50 text-gray-500 text-sm border-r">$</span>
+                                            <input type="number" min="1" step="1000" className="flex-1 p-2 text-sm focus:outline-none" value={shippingFreeFrom} onChange={(e) => setShippingFreeFrom(e.target.value)} placeholder="50000" />
+                                        </div>
+                                    </div>
+                                )}
+                            </div>
+                        )}
+
                         <div>
                             <label className="text-sm font-semibold text-gray-700 flex items-center gap-2">
                                 <i className="fa-regular fa-note-sticky text-gray-400" />

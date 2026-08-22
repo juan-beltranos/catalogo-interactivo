@@ -122,6 +122,8 @@ interface ShippingConfig {
   costCarrier: number;
   note: string;
   hidePrices: boolean;
+  freeEnabled: boolean;
+  freeFrom: number;
 }
 
 const getShippingConfig = (store: any): ShippingConfig => ({
@@ -131,6 +133,8 @@ const getShippingConfig = (store: any): ShippingConfig => ({
   costCarrier: Number(store?.shippingCostCarrier ?? 0),
   note: store?.shippingNote ?? "",
   hidePrices: store?.shippingHidePrices ?? false,
+  freeEnabled: store?.shippingFreeEnabled ?? false,
+  freeFrom: Math.max(0, Number(store?.shippingFreeFrom ?? 0)),
 });
 
 const getCheckoutFields = (store: any): CheckoutFieldConfig[] => {
@@ -429,15 +433,21 @@ const CatalogView: React.FC = () => {
     });
   }, [shippingConfig.enabled, availableShippingMethods]);
 
+  const subtotal = useMemo(() => calcTotal(cart), [cart]);
+  const qualifiesForFreeShipping =
+    shippingConfig.freeEnabled &&
+    shippingConfig.freeFrom > 0 &&
+    subtotal >= shippingConfig.freeFrom;
+
   // Costo de envío según selección
   const shippingCost = useMemo(() => {
     if (!shippingConfig.enabled || !selectedShipping) return 0;
+    if (qualifiesForFreeShipping) return 0;
     if (selectedShipping === "cod") return shippingConfig.costCOD;
     if (selectedShipping === "carrier") return shippingConfig.costCarrier;
     return 0;
-  }, [shippingConfig, selectedShipping]);
+  }, [shippingConfig, selectedShipping, qualifiesForFreeShipping]);
 
-  const subtotal = useMemo(() => calcTotal(cart), [cart]);
   const total = useMemo(() => subtotal + shippingCost, [subtotal, shippingCost]);
 
   const categoryNameById = useMemo(() => {
@@ -1927,7 +1937,7 @@ const CatalogView: React.FC = () => {
                               </div>
                               {!shippingConfig.hidePrices && (
                                 <div className="text-xs text-gray-500 mt-0.5">
-                                  {cost === 0 ? "Gratis" : `+${formatCOP(cost)}`}
+                                  {qualifiesForFreeShipping || cost === 0 ? "Gratis" : `+${formatCOP(cost)}`}
                                 </div>
                               )}
                             </div>
@@ -1955,6 +1965,17 @@ const CatalogView: React.FC = () => {
                     <div className="flex items-start gap-2 rounded-xl border border-amber-200 bg-amber-50 px-3 py-2.5">
                       <i className="fa-solid fa-circle-info text-amber-500 text-sm mt-0.5 shrink-0" />
                       <p className="text-xs text-amber-800">El pago contra entrega no está disponible para uno o más productos del carrito.</p>
+                    </div>
+                  ) : null}
+
+                  {!shippingConfig.hidePrices && shippingConfig.freeEnabled && shippingConfig.freeFrom > 0 ? (
+                    <div className={`flex items-start gap-2 rounded-xl border px-3 py-2.5 ${qualifiesForFreeShipping ? "border-green-200 bg-green-50" : "border-indigo-100 bg-indigo-50"}`}>
+                      <i className={`fa-solid ${qualifiesForFreeShipping ? "fa-circle-check text-green-600" : "fa-gift text-indigo-500"} text-sm mt-0.5 shrink-0`} />
+                      <p className={`text-xs ${qualifiesForFreeShipping ? "text-green-800" : "text-indigo-800"}`}>
+                        {qualifiesForFreeShipping
+                          ? "¡Tu pedido tiene envío gratis!"
+                          : `Envío gratis desde ${formatCOP(shippingConfig.freeFrom)}. Te faltan ${formatCOP(shippingConfig.freeFrom - subtotal)}.`}
+                      </p>
                     </div>
                   ) : null}
 
